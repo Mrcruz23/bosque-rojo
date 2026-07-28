@@ -120,9 +120,6 @@
   #videoBtn.recording{
     background:#ff2d1a; border-color:#fff; color:#fff;
   }
-  #videoBtn.recording::before{
-    content:'■';
-  }
 
   #hint{
     position:fixed; top:50%; left:50%; transform:translate(-50%,-50%);
@@ -184,7 +181,7 @@
     <div class="chip" data-param="darkness">Sombra</div>
     <div class="chip" data-param="glow">Brillo troncos</div>
     <div class="chip" data-param="vignette">Viñeta</div>
-    <div class="chip" data-param="grain">Grano</div>
+    <div class="chip" data-param="grain">Ruido</div>
   </div>
 
   <div id="sliderWrap">
@@ -315,22 +312,25 @@ void main(){
   // Loop time so it never grows unbounded across a long session (bounded inputs
   // keep hash() accurate even under mediump precision).
   float loopedTime = mod(uTime, 1000.0);
-  vec2 noiseUv = uv * vec2(uResolution.x/uResolution.y, 1.0) * 38.0;
+  // Higher frequency (55 vs 38) = finer, more glitter-like points.
+  vec2 noiseUv = uv * vec2(uResolution.x/uResolution.y, 1.0) * 55.0;
   float n1 = fbm(noiseUv + vec2(0.0, loopedTime * 0.15));
   float n2 = fbm(noiseUv * 1.8 - vec2(0.0, loopedTime * 0.22) + 11.3);
-  // Original threshold/power validated to give sparse, defined points rather
-  // than a soft haze — over-tightening this made the effect disappear entirely.
-  float sparkle = pow(max(n1 * n2 - 0.35, 0.0) * 3.0, 2.2);
+  // Hard threshold (not a soft pow curve) so sparkles read as crisp, isolated
+  // points of light rather than a diffuse dirty-lens haze.
+  float sparkle = pow(clamp((n1 * n2 - 0.42) / 0.03, 0.0, 1.0), 2.0);
   float glowMask = darkMask * sparkle * uGlow;
-  vec3 glowColor = vec3(1.0, 0.35, 0.12);
-  duotone += glowColor * glowMask * 1.6;
+  vec3 glowColor = vec3(1.0, 0.55, 0.2);
+  duotone += glowColor * glowMask * 2.2;
 
-  // --- Fine grain ---
-  // Real photographic grain: signed noise around 0, wide enough range to read
-  // as texture rather than a flat brightness/contrast shift.
-  vec2 grainUv = uv * 400.0;
-  float gRaw = hash(grainUv + loopedTime * 60.0) - 0.5; // -0.5..0.5
-  float g = gRaw * uGrain * 0.35;
+  // --- Fine grain / "Ruido" ---
+  // Block-based noise (several device pixels per cell) instead of 1:1 pixel
+  // noise — true per-pixel noise is often too fine to read on a phone screen
+  // at normal viewing distance/compression. Also boosted range so the effect
+  // is unmistakable rather than needing to be hunted for.
+  vec2 grainCell = floor(uv * uResolution.xy / 2.2);
+  float gRaw = hash(grainCell + loopedTime * 60.0) - 0.5; // -0.5..0.5
+  float g = gRaw * uGrain * 0.6;
   duotone += vec3(g);
 
   gl_FragColor = vec4(clamp(duotone, 0.0, 1.0), 1.0);
@@ -390,7 +390,7 @@ const paramLabels = {
   darkness: 'Sombra',
   glow: 'Brillo troncos',
   vignette: 'Viñeta',
-  grain: 'Grano'
+  grain: 'Ruido'
 };
 
 let currentParam = 'intensity';
@@ -489,10 +489,20 @@ const recTime = document.getElementById('recTime');
 let mediaRecorder = null;
 let recordedChunks = [];
 let isRecording = false;
-let pressTimer = null;
-let holdTriggered = false;
 let recStartTime = 0;
 let recTimerInterval = null;
+
+// Resolve the supported codec once at load time instead of re-querying
+// MediaRecorder.isTypeSupported() on every recording start — that lookup
+// can be slow on some Android WebViews and was causing a visible stutter
+// right when you tapped record.
+const SUPPORTED_MIME_TYPE = (() => {
+  const candidates = ['video/webm;codecs=vp9', 'video/webm;codecs=vp8', 'video/webm'];
+  for(const m of candidates){
+    if(MediaRecorder.isTypeSupported(m)) return m;
+  }
+  return 'video/webm';
+})();
 
 function getCanvasStream(){
   return canvas.captureStream(30);
@@ -502,10 +512,7 @@ function startRecording(){
   if(isRecording) return;
   recordedChunks = [];
   const canvasStream = getCanvasStream();
-  let mimeType = 'video/webm;codecs=vp9';
-  if(!MediaRecorder.isTypeSupported(mimeType)) mimeType = 'video/webm;codecs=vp8';
-  if(!MediaRecorder.isTypeSupported(mimeType)) mimeType = 'video/webm';
-  mediaRecorder = new MediaRecorder(canvasStream, { mimeType, videoBitsPerSecond: 6000000 });
+  mediaRecorder = new MediaRecorder(canvasStream, { mimeType: SUPPORTED_MIME_TYPE, videoBitsPerSecond: 6000000 });
   mediaRecorder.ondataavailable = e => { if(e.data.size > 0) recordedChunks.push(e.data); };
   mediaRecorder.onstop = () => {
     const blob = new Blob(recordedChunks, { type: 'video/webm' });
@@ -516,6 +523,7 @@ function startRecording(){
   isRecording = true;
   shutterBtn.classList.add('recording');
   videoBtn.classList.add('recording');
+  videoBtn.textContent = '■';
   recIndicator.classList.add('active');
   recStartTime = Date.now();
   recTimerInterval = setInterval(() => {
@@ -532,6 +540,7 @@ function stopRecording(){
   isRecording = false;
   shutterBtn.classList.remove('recording');
   videoBtn.classList.remove('recording');
+  videoBtn.textContent = '●';
   recIndicator.classList.remove('active');
   clearInterval(recTimerInterval);
   recTime.textContent = '00:00';
