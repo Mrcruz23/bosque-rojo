@@ -114,6 +114,15 @@
     content:''; display:block; width:22px; height:22px; margin:auto;
     background:#ff2d1a; border-radius:4px;
   }
+  #videoBtn{
+    font-size:16px; color:#ff5544;
+  }
+  #videoBtn.recording{
+    background:#ff2d1a; border-color:#fff; color:#fff;
+  }
+  #videoBtn.recording::before{
+    content:'■';
+  }
 
   #hint{
     position:fixed; top:50%; left:50%; transform:translate(-50%,-50%);
@@ -185,7 +194,8 @@
 
   <div id="controlsRow">
     <div class="iconBtn" id="flipBtn" title="Cambiar cámara">⟲</div>
-    <div id="shutterBtn"></div>
+    <div id="shutterBtn" title="Tomar foto"></div>
+    <div class="iconBtn" id="videoBtn" title="Grabar video">●</div>
     <div class="iconBtn" id="importBtn" title="Importar video">⇪</div>
   </div>
 </div>
@@ -299,25 +309,29 @@ void main(){
   duotone *= mix(1.0, vign, uVignette);
 
   // --- Glowing noise masked onto dark, vertical (trunk-like) areas ---
-  // detect vertical dark structures via low luminance + low horizontal variance proxy
-  float darkMask = 1.0 - smoothstep(0.03, 0.42, lum);
+  // Tighter luminance window: only the deepest shadows qualify, so in a very
+  // dark room the whole frame doesn't light up uniformly — only true blacks do.
+  float darkMask = 1.0 - smoothstep(0.01, 0.18, lum);
   // Loop time so it never grows unbounded across a long session (bounded inputs
   // keep hash() accurate even under mediump precision).
   float loopedTime = mod(uTime, 1000.0);
   vec2 noiseUv = uv * vec2(uResolution.x/uResolution.y, 1.0) * 38.0;
   float n1 = fbm(noiseUv + vec2(0.0, loopedTime * 0.15));
   float n2 = fbm(noiseUv * 1.8 - vec2(0.0, loopedTime * 0.22) + 11.3);
+  // Original threshold/power validated to give sparse, defined points rather
+  // than a soft haze — over-tightening this made the effect disappear entirely.
   float sparkle = pow(max(n1 * n2 - 0.35, 0.0) * 3.0, 2.2);
   float glowMask = darkMask * sparkle * uGlow;
   vec3 glowColor = vec3(1.0, 0.35, 0.12);
   duotone += glowColor * glowMask * 1.6;
 
   // --- Fine grain ---
-  // Use normalized uv (not raw pixel coords) scaled down, and loop time,
-  // so the hash() input stays small and precise on every GPU.
+  // Real photographic grain: signed noise around 0, wide enough range to read
+  // as texture rather than a flat brightness/contrast shift.
   vec2 grainUv = uv * 400.0;
-  float g = (hash(grainUv + loopedTime * 60.0) - 0.5) * uGrain * 0.12;
-  duotone += g;
+  float gRaw = hash(grainUv + loopedTime * 60.0) - 0.5; // -0.5..0.5
+  float g = gRaw * uGrain * 0.35;
+  duotone += vec3(g);
 
   gl_FragColor = vec4(clamp(duotone, 0.0, 1.0), 1.0);
 }
@@ -468,6 +482,7 @@ document.getElementById('flipBtn').addEventListener('click', () => {
 
 // ---------- Photo / Video capture (from live camera) ----------
 const shutterBtn = document.getElementById('shutterBtn');
+const videoBtn = document.getElementById('videoBtn');
 const recIndicator = document.getElementById('recIndicator');
 const recTime = document.getElementById('recTime');
 
@@ -500,6 +515,7 @@ function startRecording(){
   mediaRecorder.start();
   isRecording = true;
   shutterBtn.classList.add('recording');
+  videoBtn.classList.add('recording');
   recIndicator.classList.add('active');
   recStartTime = Date.now();
   recTimerInterval = setInterval(() => {
@@ -515,6 +531,7 @@ function stopRecording(){
   mediaRecorder.stop();
   isRecording = false;
   shutterBtn.classList.remove('recording');
+  videoBtn.classList.remove('recording');
   recIndicator.classList.remove('active');
   clearInterval(recTimerInterval);
   recTime.textContent = '00:00';
@@ -527,20 +544,18 @@ function takePhoto(){
   }, 'image/png');
 }
 
-shutterBtn.addEventListener('pointerdown', () => {
-  holdTriggered = false;
-  pressTimer = setTimeout(() => {
-    holdTriggered = true;
-    startRecording();
-  }, 260);
+shutterBtn.addEventListener('click', () => {
+  if(usingFileSource) return; // no photo snap while previewing imported file
+  if(isRecording) return; // avoid accidental snap mid-recording
+  takePhoto();
 });
-shutterBtn.addEventListener('pointerup', () => {
-  clearTimeout(pressTimer);
-  if(holdTriggered){
+
+videoBtn.addEventListener('click', () => {
+  if(usingFileSource) return;
+  if(isRecording){
     stopRecording();
   }else{
-    if(usingFileSource) return; // no photo snap while previewing imported file
-    takePhoto();
+    startRecording();
   }
 });
 
