@@ -1,0 +1,668 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<title>Bosque Rojo — Filtro</title>
+<meta name="theme-color" content="#0a0000">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<link rel="manifest" href="manifest.webmanifest">
+<style>
+  :root{
+    --blood: #c40412;
+    --ember: #ff2d1a;
+    --void: #060202;
+    --ash: #7a6a68;
+    --ui-glass: rgba(10,4,4,0.55);
+  }
+  *{box-sizing:border-box; -webkit-tap-highlight-color:transparent; user-select:none;}
+  html,body{
+    margin:0; padding:0; width:100%; height:100%;
+    background:var(--void); overflow:hidden;
+    font-family:'Courier New', ui-monospace, monospace;
+    color:#e8d9d6;
+  }
+  #stage{
+    position:fixed; inset:0; width:100%; height:100%;
+    display:flex; align-items:center; justify-content:center;
+    background:#000;
+  }
+  canvas#glcanvas{
+    width:100%; height:100%; object-fit:cover; display:block;
+  }
+  video#srcVideo, video#fileVideo{ display:none; }
+
+  /* Top status bar */
+  #topbar{
+    position:fixed; top:0; left:0; right:0;
+    padding:calc(env(safe-area-inset-top) + 14px) 18px 10px;
+    display:flex; justify-content:space-between; align-items:center;
+    z-index:10; pointer-events:none;
+    background:linear-gradient(to bottom, rgba(0,0,0,0.65), transparent);
+  }
+  #brand{
+    font-size:11px; letter-spacing:0.25em; text-transform:uppercase;
+    color:var(--ember); opacity:0.85; font-weight:bold;
+  }
+  #brand span{ color:#5a4442; }
+  #recIndicator{
+    display:flex; align-items:center; gap:6px;
+    font-size:12px; letter-spacing:0.1em; color:#ff5544;
+    opacity:0; transition:opacity 0.2s;
+  }
+  #recIndicator.active{ opacity:1; }
+  #recDot{
+    width:9px; height:9px; border-radius:50%; background:#ff2d1a;
+    animation:pulse 1s infinite ease-in-out;
+    box-shadow:0 0 8px #ff2d1a;
+  }
+  @keyframes pulse{ 0%,100%{opacity:1;} 50%{opacity:0.25;} }
+
+  /* Bottom controls */
+  #bottombar{
+    position:fixed; bottom:0; left:0; right:0;
+    padding:16px 20px calc(env(safe-area-inset-bottom) + 20px);
+    z-index:10;
+    background:linear-gradient(to top, rgba(0,0,0,0.75), transparent);
+  }
+  #paramRow{
+    display:flex; gap:8px; overflow-x:auto; margin-bottom:14px;
+    padding-bottom:2px; scrollbar-width:none;
+  }
+  #paramRow::-webkit-scrollbar{ display:none; }
+  .chip{
+    flex:0 0 auto; padding:7px 13px; border-radius:3px;
+    background:var(--ui-glass); border:1px solid rgba(196,4,18,0.4);
+    font-size:10px; letter-spacing:0.08em; text-transform:uppercase;
+    color:#c9b6b3; white-space:nowrap; cursor:pointer;
+  }
+  .chip.selected{
+    background:rgba(196,4,18,0.35); border-color:var(--ember); color:#fff;
+  }
+  #sliderWrap{
+    display:none; align-items:center; gap:10px; margin-bottom:14px;
+    background:var(--ui-glass); padding:10px 14px; border-radius:4px;
+    border:1px solid rgba(196,4,18,0.3);
+  }
+  #sliderWrap.show{ display:flex; }
+  #sliderLabel{ font-size:10px; letter-spacing:0.1em; color:var(--ash); width:70px; text-transform:uppercase;}
+  #sliderInput{ flex:1; accent-color:var(--ember); }
+
+  #controlsRow{
+    display:flex; align-items:center; justify-content:space-between;
+  }
+  .iconBtn{
+    width:46px; height:46px; border-radius:50%;
+    background:var(--ui-glass); border:1px solid rgba(196,4,18,0.4);
+    display:flex; align-items:center; justify-content:center;
+    font-size:19px; color:#e8d9d6; cursor:pointer;
+  }
+  .iconBtn:active{ background:rgba(196,4,18,0.4); }
+
+  #shutterBtn{
+    width:74px; height:74px; border-radius:50%;
+    background:radial-gradient(circle at 35% 30%, #ff4433, #a30410 70%);
+    border:4px solid rgba(255,255,255,0.85);
+    box-shadow:0 0 22px rgba(196,4,18,0.65);
+    cursor:pointer;
+  }
+  #shutterBtn.recording{
+    background:#111; border-color:#ff2d1a;
+  }
+  #shutterBtn.recording::after{
+    content:''; display:block; width:22px; height:22px; margin:auto;
+    background:#ff2d1a; border-radius:4px;
+  }
+
+  #hint{
+    position:fixed; top:50%; left:50%; transform:translate(-50%,-50%);
+    color:rgba(232,217,214,0.5); font-size:12px; letter-spacing:0.15em;
+    text-transform:uppercase; z-index:5; text-align:center; pointer-events:none;
+    display:none;
+  }
+  #hint.show{ display:block; }
+
+  #importBar{
+    position:fixed; top:0; left:0; right:0; bottom:0;
+    z-index:20; background:rgba(3,1,1,0.92);
+    display:none; align-items:center; justify-content:center; flex-direction:column;
+    gap:18px; padding:24px;
+  }
+  #importBar.show{ display:flex; }
+  #importBar p{ font-size:12px; letter-spacing:0.1em; color:var(--ash); text-align:center; max-width:280px;}
+  #exportProgress{
+    width:220px; height:3px; background:rgba(196,4,18,0.2); border-radius:2px; overflow:hidden;
+  }
+  #exportProgressFill{
+    height:100%; width:0%; background:var(--ember); transition:width 0.15s linear;
+  }
+  .bigBtn{
+    padding:13px 26px; border-radius:3px; border:1px solid var(--ember);
+    background:rgba(196,4,18,0.15); color:#fff; font-size:12px;
+    letter-spacing:0.1em; text-transform:uppercase; cursor:pointer;
+    font-family:inherit;
+  }
+  .bigBtn:active{ background:rgba(196,4,18,0.4); }
+
+  #installToast{
+    position:fixed; left:50%; bottom:110px; transform:translateX(-50%);
+    background:rgba(10,3,3,0.92); border:1px solid var(--ember);
+    padding:10px 16px; border-radius:4px; font-size:11px; letter-spacing:0.06em;
+    color:#e8d9d6; z-index:30; display:none; white-space:nowrap;
+  }
+  #installToast.show{ display:block; }
+</style>
+</head>
+<body>
+
+<div id="stage">
+  <canvas id="glcanvas"></canvas>
+  <video id="srcVideo" playsinline muted autoplay></video>
+  <video id="fileVideo" playsinline muted></video>
+</div>
+
+<div id="hint">Iniciando cámara…</div>
+
+<div id="topbar">
+  <div id="brand">Bosque<span>_</span>Rojo</div>
+  <div id="recIndicator"><div id="recDot"></div>REC <span id="recTime">00:00</span></div>
+</div>
+
+<div id="bottombar">
+  <div id="paramRow">
+    <div class="chip selected" data-param="intensity">Rojo</div>
+    <div class="chip" data-param="darkness">Sombra</div>
+    <div class="chip" data-param="glow">Brillo troncos</div>
+    <div class="chip" data-param="vignette">Viñeta</div>
+    <div class="chip" data-param="grain">Grano</div>
+  </div>
+
+  <div id="sliderWrap">
+    <div id="sliderLabel">Rojo</div>
+    <input type="range" id="sliderInput" min="0" max="100" value="70">
+  </div>
+
+  <div id="controlsRow">
+    <div class="iconBtn" id="flipBtn" title="Cambiar cámara">⟲</div>
+    <div id="shutterBtn"></div>
+    <div class="iconBtn" id="importBtn" title="Importar video">⇪</div>
+  </div>
+</div>
+
+<input type="file" id="fileInput" accept="video/*" style="display:none">
+
+<div id="importBar">
+  <p id="importStatus">Procesando video con el filtro…</p>
+  <div id="exportProgress"><div id="exportProgressFill"></div></div>
+  <div class="bigBtn" id="cancelImport" style="display:none;">Cancelar</div>
+  <a id="downloadLink" class="bigBtn" style="display:none; text-decoration:none;" download="bosque-rojo.webm">Descargar video</a>
+  <div class="bigBtn" id="closeImportBtn" style="display:none;">Volver a cámara</div>
+</div>
+
+<div id="installToast">Instalá esta app: menú del navegador → "Agregar a pantalla de inicio"</div>
+
+<script>
+// ============================================================
+// BOSQUE ROJO — Filtro de video estilo "human_antithesis"
+// Duotono negro/rojo + viñeta central oscura + ruido brillante
+// enmascarado en zonas oscuras verticales (troncos)
+// ============================================================
+
+const canvas = document.getElementById('glcanvas');
+const gl = canvas.getContext('webgl', { preserveDrawingBuffer: true, antialias: false }) ||
+           canvas.getContext('experimental-webgl', { preserveDrawingBuffer: true });
+
+const srcVideo = document.getElementById('srcVideo');
+const fileVideo = document.getElementById('fileVideo');
+const hint = document.getElementById('hint');
+
+let usingFileSource = false;
+let activeVideo = srcVideo;
+
+// ---------- Shader ----------
+const vertSrc = `
+attribute vec2 aPos;
+varying vec2 vUv;
+void main(){
+  vUv = aPos * 0.5 + 0.5;
+  vUv.y = 1.0 - vUv.y;
+  gl_Position = vec4(aPos, 0.0, 1.0);
+}
+`;
+
+const fragSrc = `
+precision highp float;
+varying vec2 vUv;
+uniform sampler2D uTex;
+uniform float uTime;
+uniform float uIntensity;   // duotone red strength
+uniform float uDarkness;    // shadow crush
+uniform float uGlow;        // trunk noise glow amount
+uniform float uVignette;    // center darkening amount
+uniform float uGrain;       // fine grain
+uniform vec2  uResolution;
+
+float hash(vec2 p){
+  return fract(sin(dot(p, vec2(127.1,311.7))) * 43758.5453123);
+}
+float noise(vec2 p){
+  vec2 i = floor(p);
+  vec2 f = fract(p);
+  float a = hash(i);
+  float b = hash(i + vec2(1.0,0.0));
+  float c = hash(i + vec2(0.0,1.0));
+  float d = hash(i + vec2(1.0,1.0));
+  vec2 u = f*f*(3.0-2.0*f);
+  return mix(a,b,u.x) + (c-a)*u.y*(1.0-u.x) + (d-b)*u.x*u.y;
+}
+float fbm(vec2 p){
+  float v = 0.0;
+  float amp = 0.5;
+  for(int i=0;i<4;i++){
+    v += amp * noise(p);
+    p *= 2.02;
+    amp *= 0.5;
+  }
+  return v;
+}
+
+void main(){
+  vec2 uv = vUv;
+  vec4 srcColor = texture2D(uTex, uv);
+  float lum = dot(srcColor.rgb, vec3(0.299, 0.587, 0.114));
+
+  // --- Duotone curve: crush blacks, push mids/highs to red ---
+  float crushed = pow(lum, 1.0 + uDarkness * 2.2);
+  float redAmount = smoothstep(0.02, 0.55, crushed);
+  vec3 blood = vec3(0.77, 0.01, 0.02);
+  vec3 ember = vec3(1.0, 0.25, 0.05);
+  vec3 duotone = mix(vec3(0.0), mix(blood, ember, crushed*0.4), redAmount);
+  duotone = mix(vec3(lum), duotone, uIntensity);
+
+  // slight red push overall so near-black stays warm, not pure grey-black
+  duotone += vec3(0.03, 0.0, 0.0) * (1.0 - redAmount);
+
+  // --- Vignette: darken the center-ish where silhouettes usually are ---
+  vec2 centered = (uv - 0.5) * vec2(uResolution.x/uResolution.y, 1.0);
+  float distToCenterBand = abs(centered.y + 0.05);
+  float bandMask = smoothstep(0.55, 0.05, distToCenterBand);
+  float edgeVign = smoothstep(0.95, 0.35, length(centered));
+  float vign = mix(1.0, mix(1.0, 0.15, bandMask), uVignette) * mix(1.0, edgeVign, uVignette*0.6);
+  duotone *= mix(1.0, vign, uVignette);
+
+  // --- Glowing noise masked onto dark, vertical (trunk-like) areas ---
+  // detect vertical dark structures via low luminance + low horizontal variance proxy
+  float darkMask = 1.0 - smoothstep(0.03, 0.42, lum);
+  vec2 noiseUv = uv * vec2(uResolution.x/uResolution.y, 1.0) * 38.0;
+  float n1 = fbm(noiseUv + vec2(0.0, uTime * 0.15));
+  float n2 = fbm(noiseUv * 1.8 - vec2(0.0, uTime * 0.22) + 11.3);
+  float sparkle = pow(max(n1 * n2 - 0.35, 0.0) * 3.0, 2.2);
+  float glowMask = darkMask * sparkle * uGlow;
+  vec3 glowColor = vec3(1.0, 0.35, 0.12);
+  duotone += glowColor * glowMask * 1.6;
+
+  // --- Fine grain ---
+  float g = (hash(uv * uResolution.xy + uTime*60.0) - 0.5) * uGrain * 0.12;
+  duotone += g;
+
+  gl_FragColor = vec4(clamp(duotone, 0.0, 1.0), 1.0);
+}
+`;
+
+function compileShader(src, type){
+  const s = gl.createShader(type);
+  gl.shaderSource(s, src);
+  gl.compileShader(s);
+  if(!gl.getShaderParameter(s, gl.COMPILE_STATUS)){
+    console.error(gl.getShaderInfoLog(s));
+  }
+  return s;
+}
+const vShader = compileShader(vertSrc, gl.VERTEX_SHADER);
+const fShader = compileShader(fragSrc, gl.FRAGMENT_SHADER);
+const program = gl.createProgram();
+gl.attachShader(program, vShader);
+gl.attachShader(program, fShader);
+gl.linkProgram(program);
+gl.useProgram(program);
+
+const posBuf = gl.createBuffer();
+gl.bindBuffer(gl.ARRAY_BUFFER, posBuf);
+gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1,-1, 1,-1, -1,1, 1,1]), gl.STATIC_DRAW);
+const aPos = gl.getAttribLocation(program, 'aPos');
+gl.enableVertexAttribArray(aPos);
+gl.vertexAttribPointer(aPos, 2, gl.FLOAT, false, 0, 0);
+
+const uTex = gl.getUniformLocation(program, 'uTex');
+const uTime = gl.getUniformLocation(program, 'uTime');
+const uIntensity = gl.getUniformLocation(program, 'uIntensity');
+const uDarkness = gl.getUniformLocation(program, 'uDarkness');
+const uGlow = gl.getUniformLocation(program, 'uGlow');
+const uVignette = gl.getUniformLocation(program, 'uVignette');
+const uGrain = gl.getUniformLocation(program, 'uGrain');
+const uResolution = gl.getUniformLocation(program, 'uResolution');
+
+const texture = gl.createTexture();
+gl.bindTexture(gl.TEXTURE_2D, texture);
+gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+
+// ---------- Params (0..1 internal) ----------
+const params = {
+  intensity: 0.7,
+  darkness: 0.55,
+  glow: 0.55,
+  vignette: 0.5,
+  grain: 0.3
+};
+const paramLabels = {
+  intensity: 'Rojo',
+  darkness: 'Sombra',
+  glow: 'Brillo troncos',
+  vignette: 'Viñeta',
+  grain: 'Grano'
+};
+
+let currentParam = 'intensity';
+const chips = document.querySelectorAll('.chip');
+const sliderWrap = document.getElementById('sliderWrap');
+const sliderInput = document.getElementById('sliderInput');
+const sliderLabel = document.getElementById('sliderLabel');
+
+function selectParam(p){
+  currentParam = p;
+  chips.forEach(c => c.classList.toggle('selected', c.dataset.param === p));
+  sliderLabel.textContent = paramLabels[p];
+  sliderInput.value = Math.round(params[p] * 100);
+  sliderWrap.classList.add('show');
+}
+chips.forEach(chip => {
+  chip.addEventListener('click', () => selectParam(chip.dataset.param));
+});
+sliderInput.addEventListener('input', () => {
+  params[currentParam] = sliderInput.value / 100;
+});
+selectParam('intensity');
+
+// ---------- Resize ----------
+function resizeCanvas(){
+  const dpr = Math.min(window.devicePixelRatio || 1, 2);
+  canvas.width = window.innerWidth * dpr;
+  canvas.height = window.innerHeight * dpr;
+  gl.viewport(0, 0, canvas.width, canvas.height);
+}
+window.addEventListener('resize', resizeCanvas);
+resizeCanvas();
+
+// ---------- Render loop ----------
+let startTime = performance.now();
+function render(){
+  const video = activeVideo;
+  if(video.readyState >= video.HAVE_CURRENT_DATA && video.videoWidth > 0){
+    gl.bindTexture(gl.TEXTURE_2D, texture);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, video);
+
+    gl.useProgram(program);
+    gl.uniform1i(uTex, 0);
+    gl.uniform1f(uTime, (performance.now() - startTime) / 1000);
+    gl.uniform1f(uIntensity, params.intensity);
+    gl.uniform1f(uDarkness, params.darkness);
+    gl.uniform1f(uGlow, params.glow);
+    gl.uniform1f(uVignette, params.vignette);
+    gl.uniform1f(uGrain, params.grain);
+    gl.uniform2f(uResolution, canvas.width, canvas.height);
+
+    gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+  }
+  requestAnimationFrame(render);
+}
+requestAnimationFrame(render);
+
+// ---------- Camera ----------
+let currentFacing = 'environment';
+let currentStream = null;
+
+async function startCamera(facing){
+  try{
+    if(currentStream){
+      currentStream.getTracks().forEach(t => t.stop());
+    }
+    hint.textContent = 'Iniciando cámara…';
+    hint.classList.add('show');
+    const stream = await navigator.mediaDevices.getUserMedia({
+      video: { facingMode: facing, width: { ideal: 1280 }, height: { ideal: 720 } },
+      audio: false
+    });
+    currentStream = stream;
+    srcVideo.srcObject = stream;
+    await srcVideo.play();
+    hint.classList.remove('show');
+  }catch(err){
+    hint.textContent = 'No se pudo acceder a la cámara: ' + err.message;
+    hint.classList.add('show');
+    console.error(err);
+  }
+}
+startCamera(currentFacing);
+
+document.getElementById('flipBtn').addEventListener('click', () => {
+  currentFacing = currentFacing === 'environment' ? 'user' : 'environment';
+  startCamera(currentFacing);
+});
+
+// ---------- Photo / Video capture (from live camera) ----------
+const shutterBtn = document.getElementById('shutterBtn');
+const recIndicator = document.getElementById('recIndicator');
+const recTime = document.getElementById('recTime');
+
+let mediaRecorder = null;
+let recordedChunks = [];
+let isRecording = false;
+let pressTimer = null;
+let holdTriggered = false;
+let recStartTime = 0;
+let recTimerInterval = null;
+
+function getCanvasStream(){
+  return canvas.captureStream(30);
+}
+
+function startRecording(){
+  if(isRecording) return;
+  recordedChunks = [];
+  const canvasStream = getCanvasStream();
+  let mimeType = 'video/webm;codecs=vp9';
+  if(!MediaRecorder.isTypeSupported(mimeType)) mimeType = 'video/webm;codecs=vp8';
+  if(!MediaRecorder.isTypeSupported(mimeType)) mimeType = 'video/webm';
+  mediaRecorder = new MediaRecorder(canvasStream, { mimeType, videoBitsPerSecond: 6000000 });
+  mediaRecorder.ondataavailable = e => { if(e.data.size > 0) recordedChunks.push(e.data); };
+  mediaRecorder.onstop = () => {
+    const blob = new Blob(recordedChunks, { type: 'video/webm' });
+    const url = URL.createObjectURL(blob);
+    offerDownload(url, 'bosque-rojo-' + Date.now() + '.webm');
+  };
+  mediaRecorder.start();
+  isRecording = true;
+  shutterBtn.classList.add('recording');
+  recIndicator.classList.add('active');
+  recStartTime = Date.now();
+  recTimerInterval = setInterval(() => {
+    const s = Math.floor((Date.now() - recStartTime)/1000);
+    const mm = String(Math.floor(s/60)).padStart(2,'0');
+    const ss = String(s%60).padStart(2,'0');
+    recTime.textContent = mm + ':' + ss;
+  }, 250);
+}
+
+function stopRecording(){
+  if(!isRecording) return;
+  mediaRecorder.stop();
+  isRecording = false;
+  shutterBtn.classList.remove('recording');
+  recIndicator.classList.remove('active');
+  clearInterval(recTimerInterval);
+  recTime.textContent = '00:00';
+}
+
+function takePhoto(){
+  canvas.toBlob(blob => {
+    const url = URL.createObjectURL(blob);
+    offerDownload(url, 'bosque-rojo-' + Date.now() + '.png');
+  }, 'image/png');
+}
+
+shutterBtn.addEventListener('pointerdown', () => {
+  holdTriggered = false;
+  pressTimer = setTimeout(() => {
+    holdTriggered = true;
+    startRecording();
+  }, 260);
+});
+shutterBtn.addEventListener('pointerup', () => {
+  clearTimeout(pressTimer);
+  if(holdTriggered){
+    stopRecording();
+  }else{
+    if(usingFileSource) return; // no photo snap while previewing imported file
+    takePhoto();
+  }
+});
+
+function offerDownload(url, filename){
+  const importBar = document.getElementById('importBar');
+  const status = document.getElementById('importStatus');
+  const progress = document.getElementById('exportProgress');
+  const dl = document.getElementById('downloadLink');
+  const closeBtn = document.getElementById('closeImportBtn');
+  const cancelBtn = document.getElementById('cancelImport');
+
+  importBar.classList.add('show');
+  status.textContent = 'Listo.';
+  progress.style.display = 'none';
+  cancelBtn.style.display = 'none';
+  dl.href = url;
+  dl.download = filename;
+  dl.style.display = 'inline-block';
+  closeBtn.style.display = 'inline-block';
+}
+
+// ---------- Import & process existing video ----------
+const importBtn = document.getElementById('importBtn');
+const fileInput = document.getElementById('fileInput');
+const importBar = document.getElementById('importBar');
+const importStatus = document.getElementById('importStatus');
+const exportProgress = document.getElementById('exportProgress');
+const exportProgressFill = document.getElementById('exportProgressFill');
+const downloadLink = document.getElementById('downloadLink');
+const closeImportBtn = document.getElementById('closeImportBtn');
+const cancelImportBtn = document.getElementById('cancelImport');
+
+importBtn.addEventListener('click', () => fileInput.click());
+
+fileInput.addEventListener('change', async (e) => {
+  const file = e.target.files[0];
+  if(!file) return;
+
+  importBar.classList.add('show');
+  importStatus.textContent = 'Cargando video…';
+  exportProgress.style.display = 'block';
+  exportProgressFill.style.width = '0%';
+  downloadLink.style.display = 'none';
+  closeImportBtn.style.display = 'none';
+  cancelImportBtn.style.display = 'inline-block';
+
+  const url = URL.createObjectURL(file);
+  fileVideo.src = url;
+  await new Promise(res => { fileVideo.onloadedmetadata = res; });
+
+  usingFileSource = true;
+  activeVideo = fileVideo;
+
+  const duration = fileVideo.duration;
+  importStatus.textContent = 'Procesando video con el filtro…';
+
+  const canvasStream = getCanvasStream();
+  let mimeType = 'video/webm;codecs=vp9';
+  if(!MediaRecorder.isTypeSupported(mimeType)) mimeType = 'video/webm;codecs=vp8';
+  if(!MediaRecorder.isTypeSupported(mimeType)) mimeType = 'video/webm';
+
+  const chunks = [];
+  const rec = new MediaRecorder(canvasStream, { mimeType, videoBitsPerSecond: 8000000 });
+  rec.ondataavailable = e => { if(e.data.size > 0) chunks.push(e.data); };
+
+  let cancelled = false;
+  cancelImportBtn.onclick = () => {
+    cancelled = true;
+    rec.stop();
+    fileVideo.pause();
+    resetImportUI();
+  };
+
+  rec.onstop = () => {
+    if(cancelled) return;
+    const blob = new Blob(chunks, { type: 'video/webm' });
+    const outUrl = URL.createObjectURL(blob);
+    importStatus.textContent = 'Listo. El resultado quedó como .webm (sonido no incluido).';
+    exportProgress.style.display = 'none';
+    cancelImportBtn.style.display = 'none';
+    downloadLink.href = outUrl;
+    downloadLink.download = 'bosque-rojo-' + Date.now() + '.webm';
+    downloadLink.style.display = 'inline-block';
+    closeImportBtn.style.display = 'inline-block';
+  };
+
+  fileVideo.currentTime = 0;
+  fileVideo.muted = true;
+  await fileVideo.play();
+  rec.start();
+
+  const progressInterval = setInterval(() => {
+    const pct = Math.min(100, (fileVideo.currentTime / duration) * 100);
+    exportProgressFill.style.width = pct + '%';
+  }, 100);
+
+  fileVideo.onended = () => {
+    clearInterval(progressInterval);
+    exportProgressFill.style.width = '100%';
+    rec.stop();
+  };
+});
+
+function resetImportUI(){
+  importBar.classList.remove('show');
+  usingFileSource = false;
+  activeVideo = srcVideo;
+  fileInput.value = '';
+}
+closeImportBtn.addEventListener('click', resetImportUI);
+
+// ---------- PWA install hint ----------
+let deferredPrompt;
+window.addEventListener('beforeinstallprompt', (e) => {
+  e.preventDefault();
+  deferredPrompt = e;
+  const toast = document.getElementById('installToast');
+  toast.classList.add('show');
+  toast.addEventListener('click', async () => {
+    toast.classList.remove('show');
+    if(deferredPrompt){
+      deferredPrompt.prompt();
+      await deferredPrompt.userChoice;
+      deferredPrompt = null;
+    }
+  });
+  setTimeout(() => toast.classList.remove('show'), 6000);
+});
+
+// ---------- Service worker registration ----------
+if('serviceWorker' in navigator){
+  window.addEventListener('load', () => {
+    navigator.serviceWorker.register('sw.js').catch(err => console.warn('SW error', err));
+  });
+}
+</script>
+</body>
+</html>
