@@ -324,6 +324,24 @@ float worley(vec2 p){
   return minDist;
 }
 
+// Luminance-gradient edge detection (lightweight Sobel-style): samples the
+// source texture around the pixel and returns how sharply luminance changes
+// there. Used by "Ascuas" to trace branch/trunk silhouette contours instead
+// of filling whole dark regions.
+float edgeStrength(sampler2D tex, vec2 uv, vec2 texel){
+  float tl = dot(texture2D(tex, uv + texel*vec2(-1.0,-1.0)).rgb, vec3(0.299,0.587,0.114));
+  float t  = dot(texture2D(tex, uv + texel*vec2( 0.0,-1.0)).rgb, vec3(0.299,0.587,0.114));
+  float tr = dot(texture2D(tex, uv + texel*vec2( 1.0,-1.0)).rgb, vec3(0.299,0.587,0.114));
+  float l  = dot(texture2D(tex, uv + texel*vec2(-1.0, 0.0)).rgb, vec3(0.299,0.587,0.114));
+  float r  = dot(texture2D(tex, uv + texel*vec2( 1.0, 0.0)).rgb, vec3(0.299,0.587,0.114));
+  float bl = dot(texture2D(tex, uv + texel*vec2(-1.0, 1.0)).rgb, vec3(0.299,0.587,0.114));
+  float b  = dot(texture2D(tex, uv + texel*vec2( 0.0, 1.0)).rgb, vec3(0.299,0.587,0.114));
+  float br = dot(texture2D(tex, uv + texel*vec2( 1.0, 1.0)).rgb, vec3(0.299,0.587,0.114));
+  float gx = (tr + 2.0*r + br) - (tl + 2.0*l + bl);
+  float gy = (bl + 2.0*b + br) - (tl + 2.0*t + tr);
+  return length(vec2(gx, gy));
+}
+
 void main(){
   vec2 uv = vUv;
   vec4 srcColor = texture2D(uTex, uv);
@@ -337,34 +355,39 @@ void main(){
   vec3 shadowColor;
   vec3 highColor;
   vec3 warmPush;
+  vec3 duotone;
 
-  if(presetId == 1){
+  if(presetId == 2){
+    // "Ascuas" — structurally different: near-desaturated grey/blue base
+    // (not a color duotone). Color comes later, traced along edges only.
+    vec3 desat = vec3(lum) * vec3(0.62, 0.66, 0.7);
+    float crushedGrey = pow(lum, 1.0 + uDarkness * 1.6);
+    duotone = mix(desat * 0.4, desat, crushedGrey);
+  } else if(presetId == 1){
     // "Cian / Rojo" — teal shadows, hot red/pink highlights (ref. image 1)
     shadowColor = vec3(0.0, 0.05, 0.05);
     highColor = vec3(0.92, 0.08, 0.35);
     warmPush = vec3(0.0, 0.03, 0.03);
-  } else if(presetId == 2){
-    // "Ascuas" — desaturated grey base, intense red only in bright pockets (ref. image 3)
-    shadowColor = vec3(0.03, 0.03, 0.035);
-    highColor = vec3(0.95, 0.02, 0.05);
-    warmPush = vec3(0.02, 0.02, 0.02);
+    duotone = mix(shadowColor, highColor, redAmount);
+    duotone = mix(vec3(lum), duotone, uIntensity);
+    duotone += warmPush * (1.0 - redAmount);
   } else if(presetId == 3){
     // "Amanecer" — warm amber/gold highlights over a muted brown-grey base (ref. image 4)
     shadowColor = vec3(0.02, 0.015, 0.02);
     highColor = vec3(0.95, 0.55, 0.15);
     warmPush = vec3(0.025, 0.015, 0.005);
+    duotone = mix(shadowColor, highColor, redAmount);
+    duotone = mix(vec3(lum), duotone, uIntensity);
+    duotone += warmPush * (1.0 - redAmount);
   } else {
     // "Sangre" (default) — near-black shadows, blood/ember red highlights
     shadowColor = vec3(0.0, 0.0, 0.0);
     highColor = vec3(0.85, 0.05, 0.05);
     warmPush = vec3(0.03, 0.0, 0.0);
+    duotone = mix(shadowColor, highColor, redAmount);
+    duotone = mix(vec3(lum), duotone, uIntensity);
+    duotone += warmPush * (1.0 - redAmount);
   }
-
-  vec3 duotone = mix(shadowColor, highColor, redAmount);
-  duotone = mix(vec3(lum), duotone, uIntensity);
-
-  // slight color push overall so near-black stays toned, not pure grey-black
-  duotone += warmPush * (1.0 - redAmount);
 
   // --- Vignette: darken the center-ish where silhouettes usually are ---
   vec2 centered = (uv - 0.5) * vec2(uResolution.x/uResolution.y, 1.0);
@@ -381,34 +404,57 @@ void main(){
   // Loop time so it never grows unbounded across a long session (bounded inputs
   // keep hash() accurate even under mediump precision).
   float loopedTime = mod(uTime, 1000.0);
-  // Cellular/Worley noise (like Blender's Noise/Voronoi texture) instead of
-  // fbm: gives crisp, isolated glinting cells rather than soft organic blobs.
-  vec2 worleyUv = uv * vec2(uResolution.x/uResolution.y, 1.0) * 42.0 + vec2(0.0, loopedTime * 0.6);
-  float w = worley(worleyUv);
-  // Small, fast-drifting second layer so points glint/flicker over time.
-  float wFlicker = worley(worleyUv * 2.3 + loopedTime * 1.7 + 5.0);
-  // Distance near 0 = right at a cell's feature point = brightest, sharp falloff.
-  // mult=8 / pow=4 keeps it sparse — isolated glinting cells, not a dense net.
-  float sparkle = pow(clamp(1.0 - w * 8.0, 0.0, 1.0), 4.0);
-  sparkle *= mix(0.5, 1.0, clamp(1.0 - wFlicker * 2.0, 0.0, 1.0));
-  float glowMask = darkMask * sparkle * uGlow;
 
-  vec3 glowColor;
-  float glowStrength;
   if(presetId == 2){
-    // "Ascuas" — glow itself is intense red (ref. image 3), not white/cyan
-    glowColor = vec3(1.0, 0.08, 0.05);
-    glowStrength = 2.6;
-  } else if(presetId == 3){
-    // "Amanecer" — warm red/ember glow on the trunk (ref. image 4)
-    glowColor = vec3(1.0, 0.15, 0.05);
-    glowStrength = 2.6;
+    // "Ascuas" — structurally different glow: trace branch/trunk CONTOURS
+    // with glinting red, plus a faint translucent cyan halo just outside
+    // those edges (ref. image 3), instead of filling dark pockets.
+    vec2 texel = 1.0 / uResolution.xy;
+    float edge = edgeStrength(uTex, uv, texel * 1.6);
+    float edgeMask = smoothstep(0.2, 0.5, edge);
+
+    // Break the traced line up into glinting segments rather than one
+    // continuous outline, using the same cellular noise as elsewhere.
+    vec2 edgeNoiseUv = uv * vec2(uResolution.x/uResolution.y, 1.0) * 30.0 + vec2(0.0, loopedTime * 0.5);
+    float en = worley(edgeNoiseUv);
+    float edgeGlint = pow(clamp(1.0 - en * 2.2, 0.0, 1.0), 1.6);
+
+    float redEdge = edgeMask * mix(0.35, 1.0, edgeGlint) * uGlow;
+    vec3 redEdgeColor = vec3(1.0, 0.06, 0.05);
+    duotone += redEdgeColor * redEdge * 2.4;
+
+    // Faint translucent cyan bleeding just outside the red edge — sample
+    // edge strength slightly further out to approximate an outer halo.
+    float edgeOuter = edgeStrength(uTex, uv, texel * 3.2);
+    float haloMask = smoothstep(0.12, 0.35, edgeOuter) * (1.0 - edgeMask);
+    vec3 haloColor = vec3(0.15, 0.55, 0.55);
+    duotone += haloColor * haloMask * uGlow * 0.5;
   } else {
-    // "Sangre" and "Cian/Rojo" — near-white, pale cyan/ice glow
-    glowColor = vec3(0.85, 0.97, 1.0);
-    glowStrength = 2.4;
+    // Cellular/Worley noise (like Blender's Noise/Voronoi texture) instead of
+    // fbm: gives crisp, isolated glinting cells rather than soft organic blobs.
+    vec2 worleyUv = uv * vec2(uResolution.x/uResolution.y, 1.0) * 42.0 + vec2(0.0, loopedTime * 0.6);
+    float w = worley(worleyUv);
+    // Small, fast-drifting second layer so points glint/flicker over time.
+    float wFlicker = worley(worleyUv * 2.3 + loopedTime * 1.7 + 5.0);
+    // Distance near 0 = right at a cell's feature point = brightest, sharp falloff.
+    // mult=8 / pow=4 keeps it sparse — isolated glinting cells, not a dense net.
+    float sparkle = pow(clamp(1.0 - w * 8.0, 0.0, 1.0), 4.0);
+    sparkle *= mix(0.5, 1.0, clamp(1.0 - wFlicker * 2.0, 0.0, 1.0));
+    float glowMask = darkMask * sparkle * uGlow;
+
+    vec3 glowColor;
+    float glowStrength;
+    if(presetId == 3){
+      // "Amanecer" — warm red/ember glow on the trunk (ref. image 4)
+      glowColor = vec3(1.0, 0.15, 0.05);
+      glowStrength = 2.6;
+    } else {
+      // "Sangre" and "Cian/Rojo" — near-white, pale cyan/ice glow
+      glowColor = vec3(0.85, 0.97, 1.0);
+      glowStrength = 2.4;
+    }
+    duotone += glowColor * glowMask * glowStrength;
   }
-  duotone += glowColor * glowMask * glowStrength;
 
   // --- Fine grain / "Ruido" ---
   // Block-based noise (several device pixels per cell) instead of 1:1 pixel
