@@ -364,13 +364,18 @@ void main(){
     float crushedGrey = pow(lum, 1.0 + uDarkness * 1.6);
     duotone = mix(desat * 0.4, desat, crushedGrey);
   } else if(presetId == 1){
-    // "Cian / Rojo" — teal shadows, hot red/pink highlights (ref. image 1)
-    shadowColor = vec3(0.0, 0.05, 0.05);
-    highColor = vec3(0.92, 0.08, 0.35);
-    warmPush = vec3(0.0, 0.03, 0.03);
-    duotone = mix(shadowColor, highColor, redAmount);
+    // "Cian / Rojo" — teal/cyan should DOMINATE across mids and shadows,
+    // with hot red/pink only breaking through in the brightest highlights
+    // (ref. image 1). Previous version only tinted shadows faintly with
+    // cyan, so it barely showed — this pushes cyan much further up the
+    // luminance range before red takes over.
+    shadowColor = vec3(0.0, 0.35, 0.38);
+    highColor = vec3(0.95, 0.1, 0.35);
+    warmPush = vec3(0.0, 0.12, 0.13);
+    float cyanRedAmount = smoothstep(0.35, 0.85, crushed);
+    duotone = mix(shadowColor, highColor, cyanRedAmount);
     duotone = mix(vec3(lum), duotone, uIntensity);
-    duotone += warmPush * (1.0 - redAmount);
+    duotone += warmPush * (1.0 - cyanRedAmount);
   } else if(presetId == 3){
     // "Amanecer" — warm amber/gold highlights over a muted brown-grey base (ref. image 4)
     shadowColor = vec3(0.02, 0.015, 0.02);
@@ -419,7 +424,7 @@ void main(){
     float en = worley(edgeNoiseUv);
     float edgeGlint = pow(clamp(1.0 - en * 2.2, 0.0, 1.0), 1.6);
 
-    float redEdge = edgeMask * mix(0.35, 1.0, edgeGlint) * uGlow;
+    float redEdge = edgeMask * mix(0.35, 1.0, edgeGlint) * uGlow * uIntensity;
     vec3 redEdgeColor = vec3(1.0, 0.06, 0.05);
     duotone += redEdgeColor * redEdge * 2.4;
 
@@ -432,10 +437,13 @@ void main(){
   } else {
     // Cellular/Worley noise (like Blender's Noise/Voronoi texture) instead of
     // fbm: gives crisp, isolated glinting cells rather than soft organic blobs.
-    vec2 worleyUv = uv * vec2(uResolution.x/uResolution.y, 1.0) * 42.0 + vec2(0.0, loopedTime * 0.6);
+    // Oscillating offset (sin) instead of a constant linear drift — a steady
+    // upward crawl reads as "the glow is scrolling", while oscillation reads
+    // as flickering in place, which is what glitter/sparkle should do.
+    vec2 worleyUv = uv * vec2(uResolution.x/uResolution.y, 1.0) * 42.0 + vec2(0.0, sin(loopedTime * 0.18) * 1.2);
     float w = worley(worleyUv);
     // Small, fast-drifting second layer so points glint/flicker over time.
-    float wFlicker = worley(worleyUv * 2.3 + loopedTime * 1.7 + 5.0);
+    float wFlicker = worley(worleyUv * 2.3 + sin(loopedTime * 0.35 + 5.0) * 1.5);
     // Distance near 0 = right at a cell's feature point = brightest, sharp falloff.
     // mult=8 / pow=4 keeps it sparse — isolated glinting cells, not a dense net.
     float sparkle = pow(clamp(1.0 - w * 8.0, 0.0, 1.0), 4.0);
@@ -519,6 +527,15 @@ const params = {
   vignette: 0.5,
   grain: 0.3
 };
+// Label for the "intensity" slider changes meaning per preset, since what
+// uIntensity actually drives is different in each one (color mix strength
+// in Sangre/Cian-Rojo/Amanecer, edge glow strength in Ascuas).
+const intensityLabelByPreset = {
+  0: 'Rojo',
+  1: 'Cian / Rojo',
+  2: 'Brillo bordes',
+  3: 'Rojo'
+};
 const paramLabels = {
   intensity: 'Rojo',
   darkness: 'Sombra',
@@ -534,19 +551,27 @@ const PRESETS = [
   { id: 3, name: 'Amanecer' }
 ];
 let currentPreset = 0;
-const presetChips = document.querySelectorAll('.presetChip');
-presetChips.forEach(chip => {
-  chip.addEventListener('click', () => {
-    currentPreset = parseInt(chip.dataset.preset, 10);
-    presetChips.forEach(c => c.classList.toggle('selected', c === chip));
-  });
-});
 
 let currentParam = 'intensity';
 const chips = document.querySelectorAll('.chip');
 const sliderWrap = document.getElementById('sliderWrap');
 const sliderInput = document.getElementById('sliderInput');
 const sliderLabel = document.getElementById('sliderLabel');
+
+const presetChips = document.querySelectorAll('.presetChip');
+const intensityChipLabel = document.querySelector('.chip[data-param="intensity"]');
+presetChips.forEach(chip => {
+  chip.addEventListener('click', () => {
+    currentPreset = parseInt(chip.dataset.preset, 10);
+    presetChips.forEach(c => c.classList.toggle('selected', c === chip));
+    // Update the "intensity" label/chip text to match what it controls here.
+    paramLabels.intensity = intensityLabelByPreset[currentPreset];
+    intensityChipLabel.textContent = intensityLabelByPreset[currentPreset];
+    if(currentParam === 'intensity'){
+      sliderLabel.textContent = paramLabels.intensity;
+    }
+  });
+});
 
 function selectParam(p){
   currentParam = p;
