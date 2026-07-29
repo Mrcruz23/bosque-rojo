@@ -80,6 +80,20 @@
   .chip.selected{
     background:rgba(196,4,18,0.35); border-color:var(--ember); color:#fff;
   }
+  #presetRow{
+    display:flex; gap:8px; overflow-x:auto; margin-bottom:10px;
+    padding-bottom:2px; scrollbar-width:none;
+  }
+  #presetRow::-webkit-scrollbar{ display:none; }
+  .presetChip{
+    flex:0 0 auto; padding:8px 14px; border-radius:3px;
+    background:rgba(10,14,14,0.55); border:1px solid rgba(150,220,230,0.35);
+    font-size:10px; letter-spacing:0.1em; text-transform:uppercase;
+    color:#b9d8dc; white-space:nowrap; cursor:pointer; font-weight:bold;
+  }
+  .presetChip.selected{
+    background:rgba(150,220,230,0.22); border-color:#d8f4f7; color:#fff;
+  }
   #sliderWrap{
     display:none; align-items:center; gap:10px; margin-bottom:14px;
     background:var(--ui-glass); padding:10px 14px; border-radius:4px;
@@ -176,6 +190,13 @@
 </div>
 
 <div id="bottombar">
+  <div id="presetRow">
+    <div class="presetChip selected" data-preset="0">Sangre</div>
+    <div class="presetChip" data-preset="1">Cian/Rojo</div>
+    <div class="presetChip" data-preset="2">Ascuas</div>
+    <div class="presetChip" data-preset="3">Amanecer</div>
+  </div>
+
   <div id="paramRow">
     <div class="chip selected" data-param="intensity">Rojo</div>
     <div class="chip" data-param="darkness">Sombra</div>
@@ -248,6 +269,7 @@ uniform float uDarkness;    // shadow crush
 uniform float uGlow;        // trunk noise glow amount
 uniform float uVignette;    // center darkening amount
 uniform float uGrain;       // fine grain
+uniform float uPreset;      // 0=Sangre 1=Cian/Rojo 2=Ascuas 3=Amanecer
 uniform vec2  uResolution;
 
 float hash(vec2 p){
@@ -281,21 +303,68 @@ float fbm(vec2 p){
   return v;
 }
 
+// Worley/cellular noise: distance to nearest random point per grid cell.
+// Gives the crisp, cell-like clumping seen in Blender's Voronoi/Noise Texture
+// nodes — sharper and more "clustered" than smooth fbm blobs.
+float worley(vec2 p){
+  vec2 cell = floor(p);
+  vec2 f = fract(p);
+  float minDist = 1.5;
+  for(int y=-1; y<=1; y++){
+    for(int x=-1; x<=1; x++){
+      vec2 neighbor = vec2(float(x), float(y));
+      vec2 cellId = cell + neighbor;
+      // Feature point randomly placed inside this neighboring cell (0..1 range).
+      vec2 featurePoint = vec2(hash(cellId), hash(cellId + vec2(17.0, 41.0)));
+      vec2 diff = neighbor + featurePoint - f;
+      float dist = length(diff);
+      minDist = min(minDist, dist);
+    }
+  }
+  return minDist;
+}
+
 void main(){
   vec2 uv = vUv;
   vec4 srcColor = texture2D(uTex, uv);
   float lum = dot(srcColor.rgb, vec3(0.299, 0.587, 0.114));
 
-  // --- Duotone curve: crush blacks, push mids/highs to red ---
+  // --- Duotone curve: crush blacks, push mids/highs to a preset color pair ---
   float crushed = pow(lum, 1.0 + uDarkness * 2.2);
   float redAmount = smoothstep(0.02, 0.55, crushed);
-  vec3 blood = vec3(0.77, 0.01, 0.02);
-  vec3 ember = vec3(1.0, 0.25, 0.05);
-  vec3 duotone = mix(vec3(0.0), mix(blood, ember, crushed*0.4), redAmount);
+
+  int presetId = int(uPreset + 0.5);
+  vec3 shadowColor;
+  vec3 highColor;
+  vec3 warmPush;
+
+  if(presetId == 1){
+    // "Cian / Rojo" — teal shadows, hot red/pink highlights (ref. image 1)
+    shadowColor = vec3(0.0, 0.05, 0.05);
+    highColor = vec3(0.92, 0.08, 0.35);
+    warmPush = vec3(0.0, 0.03, 0.03);
+  } else if(presetId == 2){
+    // "Ascuas" — desaturated grey base, intense red only in bright pockets (ref. image 3)
+    shadowColor = vec3(0.03, 0.03, 0.035);
+    highColor = vec3(0.95, 0.02, 0.05);
+    warmPush = vec3(0.02, 0.02, 0.02);
+  } else if(presetId == 3){
+    // "Amanecer" — warm amber/gold highlights over a muted brown-grey base (ref. image 4)
+    shadowColor = vec3(0.02, 0.015, 0.02);
+    highColor = vec3(0.95, 0.55, 0.15);
+    warmPush = vec3(0.025, 0.015, 0.005);
+  } else {
+    // "Sangre" (default) — near-black shadows, blood/ember red highlights
+    shadowColor = vec3(0.0, 0.0, 0.0);
+    highColor = vec3(0.85, 0.05, 0.05);
+    warmPush = vec3(0.03, 0.0, 0.0);
+  }
+
+  vec3 duotone = mix(shadowColor, highColor, redAmount);
   duotone = mix(vec3(lum), duotone, uIntensity);
 
-  // slight red push overall so near-black stays warm, not pure grey-black
-  duotone += vec3(0.03, 0.0, 0.0) * (1.0 - redAmount);
+  // slight color push overall so near-black stays toned, not pure grey-black
+  duotone += warmPush * (1.0 - redAmount);
 
   // --- Vignette: darken the center-ish where silhouettes usually are ---
   vec2 centered = (uv - 0.5) * vec2(uResolution.x/uResolution.y, 1.0);
@@ -312,16 +381,34 @@ void main(){
   // Loop time so it never grows unbounded across a long session (bounded inputs
   // keep hash() accurate even under mediump precision).
   float loopedTime = mod(uTime, 1000.0);
-  // Higher frequency (55 vs 38) = finer, more glitter-like points.
-  vec2 noiseUv = uv * vec2(uResolution.x/uResolution.y, 1.0) * 55.0;
-  float n1 = fbm(noiseUv + vec2(0.0, loopedTime * 0.15));
-  float n2 = fbm(noiseUv * 1.8 - vec2(0.0, loopedTime * 0.22) + 11.3);
-  // Hard threshold (not a soft pow curve) so sparkles read as crisp, isolated
-  // points of light rather than a diffuse dirty-lens haze.
-  float sparkle = pow(clamp((n1 * n2 - 0.42) / 0.03, 0.0, 1.0), 2.0);
+  // Cellular/Worley noise (like Blender's Noise/Voronoi texture) instead of
+  // fbm: gives crisp, isolated glinting cells rather than soft organic blobs.
+  vec2 worleyUv = uv * vec2(uResolution.x/uResolution.y, 1.0) * 42.0 + vec2(0.0, loopedTime * 0.6);
+  float w = worley(worleyUv);
+  // Small, fast-drifting second layer so points glint/flicker over time.
+  float wFlicker = worley(worleyUv * 2.3 + loopedTime * 1.7 + 5.0);
+  // Distance near 0 = right at a cell's feature point = brightest, sharp falloff.
+  // mult=8 / pow=4 keeps it sparse — isolated glinting cells, not a dense net.
+  float sparkle = pow(clamp(1.0 - w * 8.0, 0.0, 1.0), 4.0);
+  sparkle *= mix(0.5, 1.0, clamp(1.0 - wFlicker * 2.0, 0.0, 1.0));
   float glowMask = darkMask * sparkle * uGlow;
-  vec3 glowColor = vec3(1.0, 0.55, 0.2);
-  duotone += glowColor * glowMask * 2.2;
+
+  vec3 glowColor;
+  float glowStrength;
+  if(presetId == 2){
+    // "Ascuas" — glow itself is intense red (ref. image 3), not white/cyan
+    glowColor = vec3(1.0, 0.08, 0.05);
+    glowStrength = 2.6;
+  } else if(presetId == 3){
+    // "Amanecer" — warm red/ember glow on the trunk (ref. image 4)
+    glowColor = vec3(1.0, 0.15, 0.05);
+    glowStrength = 2.6;
+  } else {
+    // "Sangre" and "Cian/Rojo" — near-white, pale cyan/ice glow
+    glowColor = vec3(0.85, 0.97, 1.0);
+    glowStrength = 2.4;
+  }
+  duotone += glowColor * glowMask * glowStrength;
 
   // --- Fine grain / "Ruido" ---
   // Block-based noise (several device pixels per cell) instead of 1:1 pixel
@@ -368,6 +455,7 @@ const uDarkness = gl.getUniformLocation(program, 'uDarkness');
 const uGlow = gl.getUniformLocation(program, 'uGlow');
 const uVignette = gl.getUniformLocation(program, 'uVignette');
 const uGrain = gl.getUniformLocation(program, 'uGrain');
+const uPreset = gl.getUniformLocation(program, 'uPreset');
 const uResolution = gl.getUniformLocation(program, 'uResolution');
 
 const texture = gl.createTexture();
@@ -392,6 +480,21 @@ const paramLabels = {
   vignette: 'Viñeta',
   grain: 'Ruido'
 };
+
+const PRESETS = [
+  { id: 0, name: 'Sangre' },
+  { id: 1, name: 'Cian/Rojo' },
+  { id: 2, name: 'Ascuas' },
+  { id: 3, name: 'Amanecer' }
+];
+let currentPreset = 0;
+const presetChips = document.querySelectorAll('.presetChip');
+presetChips.forEach(chip => {
+  chip.addEventListener('click', () => {
+    currentPreset = parseInt(chip.dataset.preset, 10);
+    presetChips.forEach(c => c.classList.toggle('selected', c === chip));
+  });
+});
 
 let currentParam = 'intensity';
 const chips = document.querySelectorAll('.chip');
@@ -440,6 +543,7 @@ function render(){
     gl.uniform1f(uGlow, params.glow);
     gl.uniform1f(uVignette, params.vignette);
     gl.uniform1f(uGrain, params.grain);
+    gl.uniform1f(uPreset, currentPreset);
     gl.uniform2f(uResolution, canvas.width, canvas.height);
 
     gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);

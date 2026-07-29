@@ -1,6 +1,6 @@
 // Bump this version string every time index.html changes so old cached
 // copies get thrown away instead of being served forever.
-const CACHE_NAME = 'bosque-rojo-v2';
+const CACHE_NAME = 'bosque-rojo-v3';
 const ASSETS = [
   './',
   './index.html',
