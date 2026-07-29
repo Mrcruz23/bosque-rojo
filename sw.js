@@ -1,4 +1,6 @@
-const CACHE_NAME = 'bosque-rojo-v1';
+// Bump this version string every time index.html changes so old cached
+// copies get thrown away instead of being served forever.
+const CACHE_NAME = 'bosque-rojo-v2';
 const ASSETS = [
   './',
   './index.html',
@@ -24,16 +26,18 @@ self.addEventListener('activate', (event) => {
   self.clients.claim();
 });
 
+// Network-first: always try to fetch the latest version from GitHub Pages.
+// Only fall back to the cached copy if the network request fails (e.g. no
+// connection) — this is what makes uploaded changes actually show up on
+// next load instead of being stuck on whatever was cached first.
 self.addEventListener('fetch', (event) => {
   event.respondWith(
-    caches.match(event.request).then((cached) => {
-      return cached || fetch(event.request).then((response) => {
-        if (event.request.method === 'GET' && response.ok) {
-          const clone = response.clone();
-          caches.open(CACHE_NAME).then((cache) => cache.put(event.request, clone));
-        }
-        return response;
-      }).catch(() => cached);
-    })
+    fetch(event.request).then((response) => {
+      if (event.request.method === 'GET' && response.ok) {
+        const clone = response.clone();
+        caches.open(CACHE_NAME).then((cache) => cache.put(event.request, clone));
+      }
+      return response;
+    }).catch(() => caches.match(event.request))
   );
 });
