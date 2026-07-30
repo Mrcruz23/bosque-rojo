@@ -103,6 +103,22 @@
   #sliderLabel{ font-size:10px; letter-spacing:0.1em; color:var(--ash); width:70px; text-transform:uppercase;}
   #sliderInput{ flex:1; accent-color:var(--ember); }
 
+  #blendModeWrap{
+    display:none; flex-wrap:wrap; gap:6px; margin-bottom:14px;
+    background:var(--ui-glass); padding:10px 12px; border-radius:4px;
+    border:1px solid rgba(196,4,18,0.3);
+  }
+  #blendModeWrap.show{ display:flex; }
+  .blendChip{
+    flex:0 0 auto; padding:6px 10px; border-radius:3px;
+    background:rgba(0,0,0,0.3); border:1px solid rgba(196,4,18,0.35);
+    font-size:9.5px; letter-spacing:0.05em; text-transform:uppercase;
+    color:#c9b6b3; white-space:nowrap; cursor:pointer;
+  }
+  .blendChip.selected{
+    background:rgba(196,4,18,0.35); border-color:var(--ember); color:#fff;
+  }
+
   #controlsRow{
     display:flex; align-items:center; justify-content:space-between;
   }
@@ -209,11 +225,23 @@
     <div class="chip" data-param="darkness">Sombra</div>
     <div class="chip" data-param="vignette">Viñeta</div>
     <div class="chip" data-param="grain">Ruido</div>
+    <div class="chip" data-param="blendmode">Fusión</div>
   </div>
 
   <div id="sliderWrap">
     <div id="sliderLabel">Rojo</div>
     <input type="range" id="sliderInput" min="0" max="100" value="70">
+  </div>
+
+  <div id="blendModeWrap">
+    <div class="blendChip selected" data-blend="0">Normal</div>
+    <div class="blendChip" data-blend="1">Multiply</div>
+    <div class="blendChip" data-blend="2">Darken</div>
+    <div class="blendChip" data-blend="3">Screen</div>
+    <div class="blendChip" data-blend="4">Lighten</div>
+    <div class="blendChip" data-blend="5">Overlay</div>
+    <div class="blendChip" data-blend="6">Soft Light</div>
+    <div class="blendChip" data-blend="7">Difference</div>
   </div>
 
   <div id="controlsRow">
@@ -277,6 +305,7 @@ uniform float uGlow;        // trunk noise glow amount
 uniform float uVignette;    // center darkening amount
 uniform float uGrain;       // fine grain
 uniform float uPreset;      // 0=Sangre 1=Cian/Rojo 2=Ascuas 3=Amanecer
+uniform float uBlendMode;   // 0=Normal 1=Multiply 2=Darken 3=Screen 4=Lighten 5=Overlay 6=SoftLight 7=Difference
 uniform vec2  uResolution;
 
 float hash(vec2 p){
@@ -349,6 +378,49 @@ float edgeStrength(sampler2D tex, vec2 uv, vec2 texel){
   return length(vec2(gx, gy));
 }
 
+// --- Standard blend mode formulas (same math as Photoshop/CSS mix-blend-mode) ---
+// Each takes the "base" (original scene color) and "blend" (our filter's
+// mapped color) and returns the composited result. Used so the person can
+// choose how the filter color combines with the scene instead of always
+// flattening via a plain linear mix, which was crushing brightness/shape
+// detail at high intensity in some presets.
+vec3 blendMultiply(vec3 base, vec3 blend){ return base * blend; }
+vec3 blendDarken(vec3 base, vec3 blend){ return min(base, blend); }
+vec3 blendScreen(vec3 base, vec3 blend){ return 1.0 - (1.0-base)*(1.0-blend); }
+vec3 blendLighten(vec3 base, vec3 blend){ return max(base, blend); }
+vec3 blendOverlayChannel(float b, float s){
+  return b < 0.5 ? (2.0*b*s) : (1.0 - 2.0*(1.0-b)*(1.0-s));
+}
+vec3 blendOverlay(vec3 base, vec3 blend){
+  return vec3(blendOverlayChannel(base.r, blend.r), blendOverlayChannel(base.g, blend.g), blendOverlayChannel(base.b, blend.b));
+}
+float blendSoftLightChannel(float b, float s){
+  if(s <= 0.5){
+    return b - (1.0 - 2.0*s) * b * (1.0 - b);
+  } else {
+    float d = (b <= 0.25) ? ((16.0*b - 12.0)*b + 4.0)*b : sqrt(b);
+    return b + (2.0*s - 1.0) * (d - b);
+  }
+}
+vec3 blendSoftLight(vec3 base, vec3 blend){
+  return vec3(blendSoftLightChannel(base.r, blend.r), blendSoftLightChannel(base.g, blend.g), blendSoftLightChannel(base.b, blend.b));
+}
+vec3 blendDifference(vec3 base, vec3 blend){ return abs(base - blend); }
+
+// Dispatch by uBlendMode: 0=Normal(plain mix, handled by caller) 1=Multiply
+// 2=Darken 3=Screen 4=Lighten 5=Overlay 6=SoftLight 7=Difference
+vec3 applyBlendMode(vec3 base, vec3 blend, float mode){
+  int m = int(mode + 0.5);
+  if(m == 1) return blendMultiply(base, blend);
+  if(m == 2) return blendDarken(base, blend);
+  if(m == 3) return blendScreen(base, blend);
+  if(m == 4) return blendLighten(base, blend);
+  if(m == 5) return blendOverlay(base, blend);
+  if(m == 6) return blendSoftLight(base, blend);
+  if(m == 7) return blendDifference(base, blend);
+  return blend; // Normal / fallback
+}
+
 void main(){
   vec2 uv = vUv;
   vec4 srcColor = texture2D(uTex, uv);
@@ -367,9 +439,11 @@ void main(){
   if(presetId == 2){
     // "Ascuas" — structurally different: near-desaturated grey/blue base
     // (not a color duotone). Color comes later, traced along edges only.
+    // Darkness range widened (was too subtle — 0.4..1.0 of the same tone,
+    // barely visible) to a much stronger crush toward near-black shadows.
     vec3 desat = vec3(lum) * vec3(0.62, 0.66, 0.7);
-    float crushedGrey = pow(lum, 1.0 + uDarkness * 1.6);
-    duotone = mix(desat * 0.4, desat, crushedGrey);
+    float crushedGrey = pow(lum, 1.0 + uDarkness * 3.5);
+    duotone = mix(desat * 0.08, desat, crushedGrey);
   } else if(presetId == 1){
     // "Cian / Rojo" — teal/cyan should DOMINATE across mids and shadows,
     // with hot red/pink only breaking through in the brightest highlights
@@ -386,9 +460,11 @@ void main(){
     float cyanRedAmount = smoothstep(0.35, 0.85, crushed);
     vec3 mappedColor = mix(shadowColor, highColor, cyanRedAmount);
     // Scale by a lifted luminance curve so texture/shape detail survives.
-    float lumShaped = mix(0.35, 1.0, crushed);
+    // Raised floor (0.55 vs 0.35) so cyan reads brighter even in shadows.
+    float lumShaped = mix(0.55, 1.0, crushed);
     vec3 coloredScene = mappedColor * lumShaped;
-    duotone = mix(vec3(lum), coloredScene, uIntensity);
+    vec3 blended = applyBlendMode(vec3(lum), coloredScene, uBlendMode);
+    duotone = mix(vec3(lum), blended, uIntensity);
     duotone += warmPush * (1.0 - cyanRedAmount);
   } else if(presetId == 3){
     // "Amanecer" — warm amber/gold highlights over a muted brown-grey base (ref. image 4)
@@ -396,7 +472,8 @@ void main(){
     highColor = vec3(0.95, 0.55, 0.15);
     warmPush = vec3(0.025, 0.015, 0.005);
     duotone = mix(shadowColor, highColor, redAmount);
-    duotone = mix(vec3(lum), duotone, uIntensity);
+    vec3 blendedAmanecer = applyBlendMode(vec3(lum), duotone, uBlendMode);
+    duotone = mix(vec3(lum), blendedAmanecer, uIntensity);
     duotone += warmPush * (1.0 - redAmount);
   } else {
     // "Sangre" (default) — near-black shadows, blood/ember red highlights
@@ -404,7 +481,8 @@ void main(){
     highColor = vec3(0.85, 0.05, 0.05);
     warmPush = vec3(0.03, 0.0, 0.0);
     duotone = mix(shadowColor, highColor, redAmount);
-    duotone = mix(vec3(lum), duotone, uIntensity);
+    vec3 blendedSangre = applyBlendMode(vec3(lum), duotone, uBlendMode);
+    duotone = mix(vec3(lum), blendedSangre, uIntensity);
     duotone += warmPush * (1.0 - redAmount);
   }
 
@@ -461,7 +539,7 @@ void main(){
     // as flickering in place, which is what glitter/sparkle should do.
     // Sangre specifically uses a higher cell frequency (smaller, denser
     // points) per request — other presets keep the original spacing.
-    float cellFreq = (presetId == 0) ? 58.0 : 42.0;
+    float cellFreq = (presetId == 0) ? 75.0 : 42.0;
     vec2 worleyUv = uv * vec2(uResolution.x/uResolution.y, 1.0) * cellFreq + vec2(0.0, sin(loopedTime * 0.18) * 1.2);
     float w = worley(worleyUv);
     // Small, fast-drifting second layer so points glint/flicker over time.
@@ -470,7 +548,7 @@ void main(){
     // mult=8 / pow=4 keeps it sparse — isolated glinting cells, not a dense net.
     // Sangre uses a slightly gentler mult so the smaller/denser cells still
     // read as visible points rather than disappearing entirely.
-    float sparkleMult = (presetId == 0) ? 6.0 : 8.0;
+    float sparkleMult = (presetId == 0) ? 5.0 : 8.0;
     float sparkle = pow(clamp(1.0 - w * sparkleMult, 0.0, 1.0), 4.0);
     sparkle *= mix(0.5, 1.0, clamp(1.0 - wFlicker * 2.0, 0.0, 1.0));
     float glowMask = darkMask * sparkle * uGlow;
@@ -535,6 +613,7 @@ const uGlow = gl.getUniformLocation(program, 'uGlow');
 const uVignette = gl.getUniformLocation(program, 'uVignette');
 const uGrain = gl.getUniformLocation(program, 'uGrain');
 const uPreset = gl.getUniformLocation(program, 'uPreset');
+const uBlendMode = gl.getUniformLocation(program, 'uBlendMode');
 const uResolution = gl.getUniformLocation(program, 'uResolution');
 
 const texture = gl.createTexture();
@@ -611,18 +690,34 @@ presetChips.forEach(chip => {
   });
 });
 
+let currentBlendMode = 0;
+const blendModeWrap = document.getElementById('blendModeWrap');
+const blendChips = document.querySelectorAll('.blendChip');
+
 function selectParam(p){
   currentParam = p;
   chips.forEach(c => c.classList.toggle('selected', c.dataset.param === p));
-  sliderLabel.textContent = paramLabels[p];
-  sliderInput.value = Math.round(params[p] * 100);
-  sliderWrap.classList.add('show');
+  if(p === 'blendmode'){
+    sliderWrap.classList.remove('show');
+    blendModeWrap.classList.add('show');
+  } else {
+    blendModeWrap.classList.remove('show');
+    sliderLabel.textContent = paramLabels[p];
+    sliderInput.value = Math.round(params[p] * 100);
+    sliderWrap.classList.add('show');
+  }
 }
 chips.forEach(chip => {
   chip.addEventListener('click', () => selectParam(chip.dataset.param));
 });
 sliderInput.addEventListener('input', () => {
   params[currentParam] = sliderInput.value / 100;
+});
+blendChips.forEach(chip => {
+  chip.addEventListener('click', () => {
+    currentBlendMode = parseInt(chip.dataset.blend, 10);
+    blendChips.forEach(c => c.classList.toggle('selected', c === chip));
+  });
 });
 selectParam('intensity');
 
@@ -657,6 +752,7 @@ function render(){
     gl.uniform1f(uVignette, params.vignette);
     gl.uniform1f(uGrain, params.grain);
     gl.uniform1f(uPreset, currentPreset);
+    gl.uniform1f(uBlendMode, currentBlendMode);
     gl.uniform2f(uResolution, canvas.width, canvas.height);
 
     gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
@@ -690,19 +786,29 @@ async function startCamera(facing){
     // Torch (flash) is only ever available on the rear camera, and only on
     // some devices — check capabilities and show/hide the button accordingly,
     // resetting state since a fresh stream always starts with torch off.
-    // IMPORTANT: getCapabilities() can report an empty/incomplete object if
-    // queried immediately — the camera hardware needs a brief moment after
-    // streaming starts before it reliably exposes torch support. A short
-    // delay here avoids the flash button failing to appear on some phones.
+    // IMPORTANT: getCapabilities() is known to report an empty object even
+    // on devices that DO support torch if queried too early — a single
+    // fixed delay isn't always enough. Poll a few times with increasing
+    // delay instead of checking only once, since the exact timing varies
+    // by device/browser and there's no reliable "ready" event for this.
     torchOn = false;
     torchBtn.classList.remove('active');
     torchBtn.style.display = 'none';
     const track = stream.getVideoTracks()[0];
-    setTimeout(() => {
-      if(currentStream !== stream) return; // camera was switched again meanwhile
-      const capabilities = track.getCapabilities ? track.getCapabilities() : {};
-      torchBtn.style.display = capabilities.torch ? 'flex' : 'none';
-    }, 400);
+    const tryDetectTorch = (attemptsLeft, delay) => {
+      setTimeout(() => {
+        if(currentStream !== stream) return; // camera was switched again meanwhile
+        const capabilities = track.getCapabilities ? track.getCapabilities() : {};
+        if(capabilities.torch){
+          torchBtn.style.display = 'flex';
+        } else if(attemptsLeft > 0){
+          tryDetectTorch(attemptsLeft - 1, delay + 300);
+        }
+        // If still nothing after all attempts, the device/browser genuinely
+        // doesn't expose torch control — button stays hidden, which is correct.
+      }, delay);
+    };
+    tryDetectTorch(4, 300);
   }catch(err){
     hint.textContent = 'No se pudo acceder a la cámara: ' + err.message;
     hint.classList.add('show');
