@@ -134,6 +134,12 @@
   #videoBtn.recording{
     background:#ff2d1a; border-color:#fff; color:#fff;
   }
+  #torchBtn{
+    font-size:17px; color:#ffd966;
+  }
+  #torchBtn.active{
+    background:rgba(255,217,102,0.35); border-color:#ffd966; color:#fff;
+  }
 
   #hint{
     position:fixed; top:50%; left:50%; transform:translate(-50%,-50%);
@@ -212,6 +218,7 @@
 
   <div id="controlsRow">
     <div class="iconBtn" id="flipBtn" title="Cambiar cámara">⟲</div>
+    <div class="iconBtn" id="torchBtn" title="Flash" style="display:none;">⚡</div>
     <div id="shutterBtn" title="Tomar foto"></div>
     <div class="iconBtn" id="videoBtn" title="Grabar video">●</div>
     <div class="iconBtn" id="importBtn" title="Importar video">⇪</div>
@@ -224,7 +231,7 @@
   <p id="importStatus">Procesando video con el filtro…</p>
   <div id="exportProgress"><div id="exportProgressFill"></div></div>
   <div class="bigBtn" id="cancelImport" style="display:none;">Cancelar</div>
-  <a id="downloadLink" class="bigBtn" style="display:none; text-decoration:none;" download="bosque-rojo.webm">Descargar video</a>
+  <a id="downloadLink" class="bigBtn" style="display:none; text-decoration:none;" download="bosque-rojo.mp4">Descargar video</a>
   <div class="bigBtn" id="closeImportBtn" style="display:none;">Volver a cámara</div>
 </div>
 
@@ -366,15 +373,20 @@ void main(){
   } else if(presetId == 1){
     // "Cian / Rojo" — teal/cyan should DOMINATE across mids and shadows,
     // with hot red/pink only breaking through in the brightest highlights
-    // (ref. image 1). Previous version only tinted shadows faintly with
-    // cyan, so it barely showed — this pushes cyan much further up the
-    // luminance range before red takes over.
-    shadowColor = vec3(0.0, 0.35, 0.38);
-    highColor = vec3(0.95, 0.1, 0.35);
-    warmPush = vec3(0.0, 0.12, 0.13);
+    // (ref. image 1).
+    // IMPORTANT: multiply the mapped color by luminance (not just mix toward
+    // a flat color pair) so brighter and darker areas of the real scene stay
+    // visually distinct at high uIntensity — otherwise everything collapses
+    // toward the same flat tone and shapes/forms disappear.
+    shadowColor = vec3(0.05, 0.55, 0.6);
+    highColor = vec3(1.0, 0.15, 0.4);
+    warmPush = vec3(0.0, 0.1, 0.11);
     float cyanRedAmount = smoothstep(0.35, 0.85, crushed);
-    duotone = mix(shadowColor, highColor, cyanRedAmount);
-    duotone = mix(vec3(lum), duotone, uIntensity);
+    vec3 mappedColor = mix(shadowColor, highColor, cyanRedAmount);
+    // Scale by a lifted luminance curve so texture/shape detail survives.
+    float lumShaped = mix(0.35, 1.0, crushed);
+    vec3 coloredScene = mappedColor * lumShaped;
+    duotone = mix(vec3(lum), coloredScene, uIntensity);
     duotone += warmPush * (1.0 - cyanRedAmount);
   } else if(presetId == 3){
     // "Amanecer" — warm amber/gold highlights over a muted brown-grey base (ref. image 4)
@@ -590,7 +602,11 @@ selectParam('intensity');
 
 // ---------- Resize ----------
 function resizeCanvas(){
-  const dpr = Math.min(window.devicePixelRatio || 1, 2);
+  // Cap at 1.5x instead of 2x: the shader does several texture samples and
+  // noise evaluations per pixel, so total pixel count matters a lot for
+  // frame rate on mid/low-end Android GPUs. 1.5x keeps things sharp enough
+  // while meaningfully cutting the per-frame workload.
+  const dpr = Math.min(window.devicePixelRatio || 1, 1.5);
   canvas.width = window.innerWidth * dpr;
   canvas.height = window.innerHeight * dpr;
   gl.viewport(0, 0, canvas.width, canvas.height);
@@ -626,6 +642,8 @@ requestAnimationFrame(render);
 // ---------- Camera ----------
 let currentFacing = 'environment';
 let currentStream = null;
+let torchOn = false;
+const torchBtn = document.getElementById('torchBtn');
 
 async function startCamera(facing){
   try{
@@ -642,6 +660,19 @@ async function startCamera(facing){
     srcVideo.srcObject = stream;
     await srcVideo.play();
     hint.classList.remove('show');
+
+    // Torch (flash) is only ever available on the rear camera, and only on
+    // some devices — check capabilities and show/hide the button accordingly,
+    // resetting state since a fresh stream always starts with torch off.
+    torchOn = false;
+    torchBtn.classList.remove('active');
+    const track = stream.getVideoTracks()[0];
+    const capabilities = track.getCapabilities ? track.getCapabilities() : {};
+    if(capabilities.torch){
+      torchBtn.style.display = 'flex';
+    } else {
+      torchBtn.style.display = 'none';
+    }
   }catch(err){
     hint.textContent = 'No se pudo acceder a la cámara: ' + err.message;
     hint.classList.add('show');
@@ -653,6 +684,22 @@ startCamera(currentFacing);
 document.getElementById('flipBtn').addEventListener('click', () => {
   currentFacing = currentFacing === 'environment' ? 'user' : 'environment';
   startCamera(currentFacing);
+});
+
+torchBtn.addEventListener('click', async () => {
+  if(!currentStream) return;
+  const track = currentStream.getVideoTracks()[0];
+  if(!track) return;
+  const next = !torchOn;
+  try{
+    await track.applyConstraints({ advanced: [{ torch: next }] });
+    torchOn = next;
+    torchBtn.classList.toggle('active', torchOn);
+  }catch(err){
+    // Some devices report torch capability but reject the constraint —
+    // fail quietly rather than breaking the rest of the UI.
+    console.error('Torch error:', err);
+  }
 });
 
 // ---------- Photo / Video capture (from live camera) ----------
@@ -671,13 +718,24 @@ let recTimerInterval = null;
 // MediaRecorder.isTypeSupported() on every recording start — that lookup
 // can be slow on some Android WebViews and was causing a visible stutter
 // right when you tapped record.
+// MP4 (H.264) is tried first since it's far more widely compatible for
+// sharing/playback than WebM — falls back to WebM automatically on
+// browsers that don't support MP4 muxing in MediaRecorder yet.
 const SUPPORTED_MIME_TYPE = (() => {
-  const candidates = ['video/webm;codecs=vp9', 'video/webm;codecs=vp8', 'video/webm'];
+  const candidates = [
+    'video/mp4;codecs=avc1',
+    'video/mp4',
+    'video/webm;codecs=vp9',
+    'video/webm;codecs=vp8',
+    'video/webm'
+  ];
   for(const m of candidates){
     if(MediaRecorder.isTypeSupported(m)) return m;
   }
   return 'video/webm';
 })();
+const OUTPUT_EXTENSION = SUPPORTED_MIME_TYPE.startsWith('video/mp4') ? 'mp4' : 'webm';
+const OUTPUT_BLOB_TYPE = SUPPORTED_MIME_TYPE.startsWith('video/mp4') ? 'video/mp4' : 'video/webm';
 
 function getCanvasStream(){
   return canvas.captureStream(30);
@@ -690,9 +748,9 @@ function startRecording(){
   mediaRecorder = new MediaRecorder(canvasStream, { mimeType: SUPPORTED_MIME_TYPE, videoBitsPerSecond: 6000000 });
   mediaRecorder.ondataavailable = e => { if(e.data.size > 0) recordedChunks.push(e.data); };
   mediaRecorder.onstop = () => {
-    const blob = new Blob(recordedChunks, { type: 'video/webm' });
+    const blob = new Blob(recordedChunks, { type: OUTPUT_BLOB_TYPE });
     const url = URL.createObjectURL(blob);
-    offerDownload(url, 'bosque-rojo-' + Date.now() + '.webm');
+    offerDownload(url, 'bosque-rojo-' + Date.now() + '.' + OUTPUT_EXTENSION);
   };
   mediaRecorder.start();
   isRecording = true;
@@ -797,12 +855,9 @@ fileInput.addEventListener('change', async (e) => {
   importStatus.textContent = 'Procesando video con el filtro…';
 
   const canvasStream = getCanvasStream();
-  let mimeType = 'video/webm;codecs=vp9';
-  if(!MediaRecorder.isTypeSupported(mimeType)) mimeType = 'video/webm;codecs=vp8';
-  if(!MediaRecorder.isTypeSupported(mimeType)) mimeType = 'video/webm';
 
   const chunks = [];
-  const rec = new MediaRecorder(canvasStream, { mimeType, videoBitsPerSecond: 8000000 });
+  const rec = new MediaRecorder(canvasStream, { mimeType: SUPPORTED_MIME_TYPE, videoBitsPerSecond: 8000000 });
   rec.ondataavailable = e => { if(e.data.size > 0) chunks.push(e.data); };
 
   let cancelled = false;
@@ -815,13 +870,13 @@ fileInput.addEventListener('change', async (e) => {
 
   rec.onstop = () => {
     if(cancelled) return;
-    const blob = new Blob(chunks, { type: 'video/webm' });
+    const blob = new Blob(chunks, { type: OUTPUT_BLOB_TYPE });
     const outUrl = URL.createObjectURL(blob);
-    importStatus.textContent = 'Listo. El resultado quedó como .webm (sonido no incluido).';
+    importStatus.textContent = 'Listo.';
     exportProgress.style.display = 'none';
     cancelImportBtn.style.display = 'none';
     downloadLink.href = outUrl;
-    downloadLink.download = 'bosque-rojo-' + Date.now() + '.webm';
+    downloadLink.download = 'bosque-rojo-' + Date.now() + '.' + OUTPUT_EXTENSION;
     downloadLink.style.display = 'inline-block';
     closeImportBtn.style.display = 'inline-block';
   };
