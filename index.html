@@ -205,8 +205,8 @@
 
   <div id="paramRow">
     <div class="chip selected" data-param="intensity">Rojo</div>
+    <div class="chip" data-param="glow">Brillos</div>
     <div class="chip" data-param="darkness">Sombra</div>
-    <div class="chip" data-param="glow">Brillo troncos</div>
     <div class="chip" data-param="vignette">Viñeta</div>
     <div class="chip" data-param="grain">Ruido</div>
   </div>
@@ -373,14 +373,16 @@ void main(){
   } else if(presetId == 1){
     // "Cian / Rojo" — teal/cyan should DOMINATE across mids and shadows,
     // with hot red/pink only breaking through in the brightest highlights
-    // (ref. image 1).
+    // (ref. image 1). Both colors pushed brighter/more saturated than the
+    // first pass, and red pushed as intense as (slightly more than) Sangre's
+    // red — not a softer pink.
     // IMPORTANT: multiply the mapped color by luminance (not just mix toward
     // a flat color pair) so brighter and darker areas of the real scene stay
     // visually distinct at high uIntensity — otherwise everything collapses
     // toward the same flat tone and shapes/forms disappear.
-    shadowColor = vec3(0.05, 0.55, 0.6);
-    highColor = vec3(1.0, 0.15, 0.4);
-    warmPush = vec3(0.0, 0.1, 0.11);
+    shadowColor = vec3(0.0, 0.85, 0.92);
+    highColor = vec3(0.95, 0.02, 0.03);
+    warmPush = vec3(0.0, 0.16, 0.17);
     float cyanRedAmount = smoothstep(0.35, 0.85, crushed);
     vec3 mappedColor = mix(shadowColor, highColor, cyanRedAmount);
     // Scale by a lifted luminance curve so texture/shape detail survives.
@@ -436,7 +438,12 @@ void main(){
     float en = worley(edgeNoiseUv);
     float edgeGlint = pow(clamp(1.0 - en * 2.2, 0.0, 1.0), 1.6);
 
-    float redEdge = edgeMask * mix(0.35, 1.0, edgeGlint) * uGlow * uIntensity;
+    // "Brillo rojo" (uIntensity) controls ONLY the red edge glow.
+    // "Brillo cian" (uGlow) controls ONLY the cyan halo.
+    // Kept fully independent so turning either down to 0 leaves the other
+    // untouched — previously both were multiplied by uGlow, so zeroing the
+    // cyan control silently killed the red too.
+    float redEdge = edgeMask * mix(0.35, 1.0, edgeGlint) * uIntensity;
     vec3 redEdgeColor = vec3(1.0, 0.06, 0.05);
     duotone += redEdgeColor * redEdge * 2.4;
 
@@ -452,13 +459,19 @@ void main(){
     // Oscillating offset (sin) instead of a constant linear drift — a steady
     // upward crawl reads as "the glow is scrolling", while oscillation reads
     // as flickering in place, which is what glitter/sparkle should do.
-    vec2 worleyUv = uv * vec2(uResolution.x/uResolution.y, 1.0) * 42.0 + vec2(0.0, sin(loopedTime * 0.18) * 1.2);
+    // Sangre specifically uses a higher cell frequency (smaller, denser
+    // points) per request — other presets keep the original spacing.
+    float cellFreq = (presetId == 0) ? 58.0 : 42.0;
+    vec2 worleyUv = uv * vec2(uResolution.x/uResolution.y, 1.0) * cellFreq + vec2(0.0, sin(loopedTime * 0.18) * 1.2);
     float w = worley(worleyUv);
     // Small, fast-drifting second layer so points glint/flicker over time.
     float wFlicker = worley(worleyUv * 2.3 + sin(loopedTime * 0.35 + 5.0) * 1.5);
     // Distance near 0 = right at a cell's feature point = brightest, sharp falloff.
     // mult=8 / pow=4 keeps it sparse — isolated glinting cells, not a dense net.
-    float sparkle = pow(clamp(1.0 - w * 8.0, 0.0, 1.0), 4.0);
+    // Sangre uses a slightly gentler mult so the smaller/denser cells still
+    // read as visible points rather than disappearing entirely.
+    float sparkleMult = (presetId == 0) ? 6.0 : 8.0;
+    float sparkle = pow(clamp(1.0 - w * sparkleMult, 0.0, 1.0), 4.0);
     sparkle *= mix(0.5, 1.0, clamp(1.0 - wFlicker * 2.0, 0.0, 1.0));
     float glowMask = darkMask * sparkle * uGlow;
 
@@ -540,18 +553,27 @@ const params = {
   grain: 0.3
 };
 // Label for the "intensity" slider changes meaning per preset, since what
+// Label for the "intensity" slider changes meaning per preset, since what
 // uIntensity actually drives is different in each one (color mix strength
-// in Sangre/Cian-Rojo/Amanecer, edge glow strength in Ascuas).
+// in Sangre/Cian-Rojo/Amanecer, red edge glow strength in Ascuas).
 const intensityLabelByPreset = {
   0: 'Rojo',
   1: 'Cian / Rojo',
-  2: 'Brillo bordes',
+  2: 'Brillo rojo',
   3: 'Rojo'
+};
+// Same idea for the "glow" slider (uGlow): trunk sparkle brightness in most
+// presets, but the cyan halo strength specifically in Ascuas.
+const glowLabelByPreset = {
+  0: 'Brillos',
+  1: 'Brillo troncos',
+  2: 'Brillo cian',
+  3: 'Brillo troncos'
 };
 const paramLabels = {
   intensity: 'Rojo',
   darkness: 'Sombra',
-  glow: 'Brillo troncos',
+  glow: 'Brillos',
   vignette: 'Viñeta',
   grain: 'Ruido'
 };
@@ -572,15 +594,19 @@ const sliderLabel = document.getElementById('sliderLabel');
 
 const presetChips = document.querySelectorAll('.presetChip');
 const intensityChipLabel = document.querySelector('.chip[data-param="intensity"]');
+const glowChipLabel = document.querySelector('.chip[data-param="glow"]');
 presetChips.forEach(chip => {
   chip.addEventListener('click', () => {
     currentPreset = parseInt(chip.dataset.preset, 10);
     presetChips.forEach(c => c.classList.toggle('selected', c === chip));
-    // Update the "intensity" label/chip text to match what it controls here.
+    // Update the "intensity" and "glow" chip text to match what each
+    // actually controls in the newly selected preset.
     paramLabels.intensity = intensityLabelByPreset[currentPreset];
     intensityChipLabel.textContent = intensityLabelByPreset[currentPreset];
-    if(currentParam === 'intensity'){
-      sliderLabel.textContent = paramLabels.intensity;
+    paramLabels.glow = glowLabelByPreset[currentPreset];
+    glowChipLabel.textContent = glowLabelByPreset[currentPreset];
+    if(currentParam === 'intensity' || currentParam === 'glow'){
+      sliderLabel.textContent = paramLabels[currentParam];
     }
   });
 });
@@ -664,15 +690,19 @@ async function startCamera(facing){
     // Torch (flash) is only ever available on the rear camera, and only on
     // some devices — check capabilities and show/hide the button accordingly,
     // resetting state since a fresh stream always starts with torch off.
+    // IMPORTANT: getCapabilities() can report an empty/incomplete object if
+    // queried immediately — the camera hardware needs a brief moment after
+    // streaming starts before it reliably exposes torch support. A short
+    // delay here avoids the flash button failing to appear on some phones.
     torchOn = false;
     torchBtn.classList.remove('active');
+    torchBtn.style.display = 'none';
     const track = stream.getVideoTracks()[0];
-    const capabilities = track.getCapabilities ? track.getCapabilities() : {};
-    if(capabilities.torch){
-      torchBtn.style.display = 'flex';
-    } else {
-      torchBtn.style.display = 'none';
-    }
+    setTimeout(() => {
+      if(currentStream !== stream) return; // camera was switched again meanwhile
+      const capabilities = track.getCapabilities ? track.getCapabilities() : {};
+      torchBtn.style.display = capabilities.torch ? 'flex' : 'none';
+    }, 400);
   }catch(err){
     hint.textContent = 'No se pudo acceder a la cámara: ' + err.message;
     hint.classList.add('show');
