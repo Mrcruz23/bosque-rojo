@@ -155,12 +155,6 @@
   #videoBtn.recording{
     background:#ff2d1a; border-color:#fff; color:#fff;
   }
-  #torchBtn{
-    font-size:17px; color:#ffd966;
-  }
-  #torchBtn.active{
-    background:rgba(255,217,102,0.35); border-color:#ffd966; color:#fff;
-  }
 
   #hint{
     position:fixed; top:50%; left:50%; transform:translate(-50%,-50%);
@@ -252,7 +246,6 @@
 
   <div id="controlsRow">
     <div class="iconBtn" id="flipBtn" title="Cambiar cámara">⟲</div>
-    <div class="iconBtn" id="torchBtn" title="Flash" style="display:none;">⚡</div>
     <div id="shutterBtn" title="Tomar foto"></div>
     <div class="iconBtn" id="videoBtn" title="Grabar video">●</div>
     <div class="iconBtn" id="importBtn" title="Importar video">⇪</div>
@@ -531,15 +524,21 @@ void main(){
     // untouched — previously both were multiplied by uGlow, so zeroing the
     // cyan control silently killed the red too.
     float redEdge = edgeMask * mix(0.35, 1.0, edgeGlint) * uIntensity;
-    vec3 redEdgeColor = vec3(1.0, 0.06, 0.05);
-    duotone += redEdgeColor * redEdge * 2.4;
 
     // Faint translucent cyan bleeding just outside the red edge — sample
     // edge strength slightly further out to approximate an outer halo.
     float edgeOuter = edgeStrength(uTex, uv, texel * 3.2);
     float haloMask = smoothstep(0.12, 0.35, edgeOuter) * (1.0 - edgeMask);
-    vec3 haloColor = vec3(0.15, 0.55, 0.55);
-    duotone += haloColor * haloMask * uGlow * 0.5;
+
+    // With "Difference" selected, swap red <-> cyan so Ascuas mirrors the
+    // same inversion behavior Cian/Rojo has under Difference, instead of
+    // these additive glow layers just ignoring the blend mode entirely.
+    bool isDifference = (int(uBlendMode + 0.5) == 7);
+    vec3 redEdgeColor = isDifference ? vec3(0.0, 0.88, 0.94) : vec3(1.0, 0.06, 0.05);
+    vec3 haloColor = isDifference ? vec3(1.0, 0.06, 0.05) : vec3(0.0, 0.88, 0.94);
+
+    duotone += redEdgeColor * redEdge * 2.4;
+    duotone += haloColor * haloMask * uGlow * 0.9;
   } else {
     // Cellular/Worley noise (like Blender's Noise/Voronoi texture) instead of
     // fbm: gives crisp, isolated glinting cells rather than soft organic blobs.
@@ -636,7 +635,7 @@ gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
 const params = {
   intensity: 0.7,
   darkness: 0.55,
-  glow: 0.55,
+  glow: 0.35,
   vignette: 0.5,
   grain: 0.0
 };
@@ -805,8 +804,6 @@ requestAnimationFrame(render);
 // ---------- Camera ----------
 let currentFacing = 'environment';
 let currentStream = null;
-let torchOn = false;
-const torchBtn = document.getElementById('torchBtn');
 
 async function startCamera(facing){
   try{
@@ -829,46 +826,12 @@ async function startCamera(facing){
     console.error(err);
     return;
   }
-
-  // Torch (flash) button visibility is now based simply on which camera is
-  // active (front cameras don't have a real hardware torch — some phones
-  // fake a "flash" for selfies by flashing the screen white instead, which
-  // is a different technique entirely and not handled here). Detecting
-  // real torch support via getCapabilities() proved unreliable across
-  // devices/browsers, so instead: show the button on the rear camera and
-  // let the actual torch toggle attempt (in the button's click handler)
-  // succeed or fail — many browsers accept the attempt harmlessly even if
-  // unsupported, and it works cleanly on ones that do support it.
-  torchOn = false;
-  torchBtn.classList.remove('active');
-  torchBtn.style.display = (facing === 'environment') ? 'flex' : 'none';
 }
 startCamera(currentFacing);
 
 document.getElementById('flipBtn').addEventListener('click', () => {
   currentFacing = currentFacing === 'environment' ? 'user' : 'environment';
   startCamera(currentFacing);
-});
-
-torchBtn.addEventListener('click', async () => {
-  if(!currentStream) return;
-  const track = currentStream.getVideoTracks()[0];
-  if(!track) return;
-  const next = !torchOn;
-  try{
-    await track.applyConstraints({ advanced: [{ torch: next }] });
-    torchOn = next;
-    torchBtn.classList.toggle('active', torchOn);
-  }catch(err){
-    // Some devices/browsers report no error but also don't actually toggle
-    // the flash, and some reject the constraint outright — brief on-screen
-    // feedback here instead of only logging, since torch failures are
-    // otherwise completely invisible to the person using the app.
-    console.error('Torch error:', err);
-    hint.textContent = 'Este dispositivo no permite controlar el flash desde el navegador';
-    hint.classList.add('show');
-    setTimeout(() => hint.classList.remove('show'), 2500);
-  }
 });
 
 // ---------- Photo / Video capture (from live camera) ----------
@@ -919,7 +882,7 @@ function startRecording(){
   mediaRecorder.onstop = () => {
     const blob = new Blob(recordedChunks, { type: OUTPUT_BLOB_TYPE });
     const url = URL.createObjectURL(blob);
-    offerDownload(url, 'bosque-rojo-' + Date.now() + '.' + OUTPUT_EXTENSION);
+    offerDownload(url, 'bosque-rojo-' + Date.now() + '.' + OUTPUT_EXTENSION, 'video');
   };
   mediaRecorder.start();
   isRecording = true;
@@ -951,7 +914,7 @@ function stopRecording(){
 function takePhoto(){
   canvas.toBlob(blob => {
     const url = URL.createObjectURL(blob);
-    offerDownload(url, 'bosque-rojo-' + Date.now() + '.png');
+    offerDownload(url, 'bosque-rojo-' + Date.now() + '.png', 'photo');
   }, 'image/png');
 }
 
@@ -970,7 +933,7 @@ videoBtn.addEventListener('click', () => {
   }
 });
 
-function offerDownload(url, filename){
+function offerDownload(url, filename, kind){
   const importBar = document.getElementById('importBar');
   const status = document.getElementById('importStatus');
   const progress = document.getElementById('exportProgress');
@@ -984,6 +947,7 @@ function offerDownload(url, filename){
   cancelBtn.style.display = 'none';
   dl.href = url;
   dl.download = filename;
+  dl.textContent = (kind === 'photo') ? 'Descargar foto' : 'Descargar video';
   dl.style.display = 'inline-block';
   closeBtn.style.display = 'inline-block';
 }
@@ -1046,6 +1010,7 @@ fileInput.addEventListener('change', async (e) => {
     cancelImportBtn.style.display = 'none';
     downloadLink.href = outUrl;
     downloadLink.download = 'bosque-rojo-' + Date.now() + '.' + OUTPUT_EXTENSION;
+    downloadLink.textContent = 'Descargar video';
     downloadLink.style.display = 'inline-block';
     closeImportBtn.style.display = 'inline-block';
   };
