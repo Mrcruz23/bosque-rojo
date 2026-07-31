@@ -394,7 +394,7 @@ vec3 blendMultiply(vec3 base, vec3 blend){ return base * blend; }
 vec3 blendDarken(vec3 base, vec3 blend){ return min(base, blend); }
 vec3 blendScreen(vec3 base, vec3 blend){ return 1.0 - (1.0-base)*(1.0-blend); }
 vec3 blendLighten(vec3 base, vec3 blend){ return max(base, blend); }
-vec3 blendOverlayChannel(float b, float s){
+float blendOverlayChannel(float b, float s){
   return b < 0.5 ? (2.0*b*s) : (1.0 - 2.0*(1.0-b)*(1.0-s));
 }
 vec3 blendOverlay(vec3 base, vec3 blend){
