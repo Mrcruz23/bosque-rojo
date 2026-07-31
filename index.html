@@ -206,7 +206,7 @@
 <div id="hint">Iniciando cámara…</div>
 
 <div id="topbar">
-  <div id="brand">Bosque<span>_</span>Rojo</div>
+  <div id="brand">Bosque Rojo</div>
   <div id="fpsDisplay"></div>
   <div id="recIndicator"><div id="recDot"></div>REC <span id="recTime">00:00</span></div>
 </div>
@@ -230,7 +230,7 @@
 
   <div id="sliderWrap">
     <div id="sliderLabel">Rojo</div>
-    <input type="range" id="sliderInput" min="0" max="100" value="70">
+    <input type="range" id="sliderInput" min="0" max="100" value="100">
   </div>
 
   <div id="blendModeWrap">
@@ -547,7 +547,9 @@ void main(){
     // as flickering in place, which is what glitter/sparkle should do.
     // Sangre specifically uses a higher cell frequency (smaller, denser
     // points) per request — other presets keep the original spacing.
-    float cellFreq = (presetId == 0) ? 75.0 : 42.0;
+    // Sangre and Cian/Rojo share the same denser, smaller-point sparkle
+    // look; Amanecer keeps the original wider/sparser spacing for now.
+    float cellFreq = (presetId == 0 || presetId == 1) ? 75.0 : 42.0;
     vec2 worleyUv = uv * vec2(uResolution.x/uResolution.y, 1.0) * cellFreq + vec2(0.0, sin(loopedTime * 0.18) * 1.2);
     float w = worley(worleyUv);
     // Small, fast-drifting second layer so points glint/flicker over time.
@@ -556,7 +558,7 @@ void main(){
     // mult=8 / pow=4 keeps it sparse — isolated glinting cells, not a dense net.
     // Sangre uses a slightly gentler mult so the smaller/denser cells still
     // read as visible points rather than disappearing entirely.
-    float sparkleMult = (presetId == 0) ? 5.0 : 8.0;
+    float sparkleMult = (presetId == 0 || presetId == 1) ? 5.0 : 8.0;
     float sparkle = pow(clamp(1.0 - w * sparkleMult, 0.0, 1.0), 4.0);
     sparkle *= mix(0.5, 1.0, clamp(1.0 - wFlicker * 2.0, 0.0, 1.0));
     float glowMask = darkMask * sparkle * uGlow;
@@ -632,14 +634,27 @@ gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
 gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
 
 // ---------- Params (0..1 internal) ----------
+// Initial values match presetDefaults[0] (Sangre) exactly, since that's the
+// preset selected by default on load — previously these were out of sync
+// with presetDefaults, so the very first load showed different numbers
+// than what re-selecting Sangre's chip would apply.
 const params = {
-  intensity: 0.7,
-  darkness: 0.55,
+  intensity: 1.0,
+  darkness: 0.25,
   glow: 0.35,
   vignette: 0.5,
   grain: 0.0
 };
-// Label for the "intensity" slider changes meaning per preset, since what
+// Per-preset default values — applied automatically whenever the person
+// switches presets, so each look starts from settings tuned for it instead
+// of carrying over whatever was set on the previous preset. blendMode is
+// included here too since Cian/Rojo defaults to Darken, not Normal.
+const presetDefaults = {
+  0: { intensity: 1.0, darkness: 0.25, glow: 0.35, vignette: 0.5, grain: 0.0, blendMode: 0 },
+  1: { intensity: 1.0, darkness: 0.35, glow: 0.35, vignette: 0.5, grain: 0.0, blendMode: 2 },
+  2: { intensity: 0.85, darkness: 0.55, glow: 0.5, vignette: 0.25, grain: 0.0, blendMode: 0 },
+  3: { intensity: 0.7, darkness: 0.55, glow: 0.35, vignette: 0.5, grain: 0.0, blendMode: 0 }
+};
 // Label for the "intensity" slider changes meaning per preset, since what
 // uIntensity actually drives is different in each one (color mix strength
 // in Sangre/Cian-Rojo/Amanecer, red edge glow strength in Ascuas).
@@ -672,12 +687,15 @@ const PRESETS = [
   { id: 3, name: 'Amanecer' }
 ];
 let currentPreset = 0;
+let currentBlendMode = 0;
 
 let currentParam = 'intensity';
 const chips = document.querySelectorAll('.chip');
 const sliderWrap = document.getElementById('sliderWrap');
 const sliderInput = document.getElementById('sliderInput');
 const sliderLabel = document.getElementById('sliderLabel');
+const blendModeWrap = document.getElementById('blendModeWrap');
+const blendChips = document.querySelectorAll('.blendChip');
 
 const presetChips = document.querySelectorAll('.presetChip');
 const intensityChipLabel = document.querySelector('.chip[data-param="intensity"]');
@@ -692,15 +710,26 @@ presetChips.forEach(chip => {
     intensityChipLabel.textContent = intensityLabelByPreset[currentPreset];
     paramLabels.glow = glowLabelByPreset[currentPreset];
     glowChipLabel.textContent = glowLabelByPreset[currentPreset];
+    // Apply this preset's tuned defaults instead of carrying over whatever
+    // the previous preset had set.
+    const defaults = presetDefaults[currentPreset];
+    params.intensity = defaults.intensity;
+    params.darkness = defaults.darkness;
+    params.glow = defaults.glow;
+    params.vignette = defaults.vignette;
+    params.grain = defaults.grain;
+    currentBlendMode = defaults.blendMode;
+    blendChips.forEach(c => c.classList.toggle('selected', parseInt(c.dataset.blend, 10) === currentBlendMode));
+    if(currentParam === 'blendmode'){
+      // no-op, selection above already reflects the new mode
+    } else if(sliderWrap.classList.contains('show')){
+      sliderInput.value = Math.round(params[currentParam] * 100);
+    }
     if(currentParam === 'intensity' || currentParam === 'glow'){
       sliderLabel.textContent = paramLabels[currentParam];
     }
   });
 });
-
-let currentBlendMode = 0;
-const blendModeWrap = document.getElementById('blendModeWrap');
-const blendChips = document.querySelectorAll('.blendChip');
 
 function selectParam(p){
   currentParam = p;
