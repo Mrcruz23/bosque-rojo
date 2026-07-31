@@ -46,6 +46,11 @@
     color:var(--ember); opacity:0.85; font-weight:bold;
   }
   #brand span{ color:#5a4442; }
+  #fpsDisplay{
+    font-size:10px; letter-spacing:0.05em; color:#88ff88;
+    opacity:0; pointer-events:none; font-family:monospace;
+  }
+  #fpsDisplay.show{ opacity:0.85; }
   #recIndicator{
     display:flex; align-items:center; gap:6px;
     font-size:12px; letter-spacing:0.1em; color:#ff5544;
@@ -208,6 +213,7 @@
 
 <div id="topbar">
   <div id="brand">Bosque<span>_</span>Rojo</div>
+  <div id="fpsDisplay"></div>
   <div id="recIndicator"><div id="recDot"></div>REC <span id="recTime">00:00</span></div>
 </div>
 
@@ -645,7 +651,7 @@ const intensityLabelByPreset = {
 // presets, but the cyan halo strength specifically in Ascuas.
 const glowLabelByPreset = {
   0: 'Brillos',
-  1: 'Brillo troncos',
+  1: 'Brillos',
   2: 'Brillo cian',
   3: 'Brillo troncos'
 };
@@ -737,6 +743,26 @@ resizeCanvas();
 
 // ---------- Render loop ----------
 let startTime = performance.now();
+let fpsFrameCount = 0;
+let fpsLastCheck = performance.now();
+const fpsDisplay = document.getElementById('fpsDisplay');
+
+// Long-press the brand text to toggle a small FPS counter — useful for
+// quickly checking real performance on-device instead of guessing whether
+// something "feels" slow.
+let brandPressTimer = null;
+document.getElementById('brand').addEventListener('pointerdown', () => {
+  brandPressTimer = setTimeout(() => {
+    fpsDisplay.classList.toggle('show');
+  }, 600);
+});
+document.getElementById('brand').addEventListener('pointerup', () => {
+  clearTimeout(brandPressTimer);
+});
+document.getElementById('brand').addEventListener('pointerleave', () => {
+  clearTimeout(brandPressTimer);
+});
+
 function render(){
   const video = activeVideo;
   if(video.readyState >= video.HAVE_CURRENT_DATA && video.videoWidth > 0){
@@ -756,6 +782,18 @@ function render(){
     gl.uniform2f(uResolution, canvas.width, canvas.height);
 
     gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+  }
+  // Lightweight FPS counter (pure JS timing, no GPU cost) — only updates
+  // the on-screen text once per second, and only does any work at all
+  // when the counter is visible, so this never affects real performance.
+  fpsFrameCount++;
+  const now = performance.now();
+  if(now - fpsLastCheck >= 1000){
+    if(fpsDisplay.classList.contains('show')){
+      fpsDisplay.textContent = fpsFrameCount + ' FPS';
+    }
+    fpsFrameCount = 0;
+    fpsLastCheck = now;
   }
   requestAnimationFrame(render);
 }
@@ -782,37 +820,47 @@ async function startCamera(facing){
     srcVideo.srcObject = stream;
     await srcVideo.play();
     hint.classList.remove('show');
-
-    // Torch (flash) is only ever available on the rear camera, and only on
-    // some devices — check capabilities and show/hide the button accordingly,
-    // resetting state since a fresh stream always starts with torch off.
-    // IMPORTANT: getCapabilities() is known to report an empty object even
-    // on devices that DO support torch if queried too early — a single
-    // fixed delay isn't always enough. Poll a few times with increasing
-    // delay instead of checking only once, since the exact timing varies
-    // by device/browser and there's no reliable "ready" event for this.
-    torchOn = false;
-    torchBtn.classList.remove('active');
-    torchBtn.style.display = 'none';
-    const track = stream.getVideoTracks()[0];
-    const tryDetectTorch = (attemptsLeft, delay) => {
-      setTimeout(() => {
-        if(currentStream !== stream) return; // camera was switched again meanwhile
-        const capabilities = track.getCapabilities ? track.getCapabilities() : {};
-        if(capabilities.torch){
-          torchBtn.style.display = 'flex';
-        } else if(attemptsLeft > 0){
-          tryDetectTorch(attemptsLeft - 1, delay + 300);
-        }
-        // If still nothing after all attempts, the device/browser genuinely
-        // doesn't expose torch control — button stays hidden, which is correct.
-      }, delay);
-    };
-    tryDetectTorch(4, 300);
   }catch(err){
     hint.textContent = 'No se pudo acceder a la cámara: ' + err.message;
     hint.classList.add('show');
     console.error(err);
+    return;
+  }
+
+  // Torch (flash) detection is intentionally OUTSIDE the camera try/catch
+  // above and wrapped in its own try/catch: a failure here (unsupported
+  // API, odd device behavior, etc.) must never be able to make the whole
+  // camera flow report as broken — the camera already started fine by
+  // this point regardless of what happens with torch.
+  try{
+    torchOn = false;
+    torchBtn.classList.remove('active');
+    torchBtn.style.display = 'none';
+    const stream = currentStream;
+    const track = stream.getVideoTracks()[0];
+    if(track){
+      // getCapabilities() is known to report an empty object even on
+      // devices that DO support torch if queried too early — poll a few
+      // times with increasing delay instead of checking only once.
+      const tryDetectTorch = (attemptsLeft, delay) => {
+        setTimeout(() => {
+          try{
+            if(currentStream !== stream) return; // camera was switched again meanwhile
+            const capabilities = track.getCapabilities ? track.getCapabilities() : {};
+            if(capabilities && capabilities.torch){
+              torchBtn.style.display = 'flex';
+            } else if(attemptsLeft > 0){
+              tryDetectTorch(attemptsLeft - 1, delay + 300);
+            }
+          }catch(e){
+            console.error('Torch detection error:', e);
+          }
+        }, delay);
+      };
+      tryDetectTorch(4, 300);
+    }
+  }catch(err){
+    console.error('Torch setup error:', err);
   }
 }
 startCamera(currentFacing);
