@@ -449,7 +449,10 @@ void main(){
     // barely visible) to a much stronger crush toward near-black shadows.
     vec3 desat = vec3(lum) * vec3(0.62, 0.66, 0.7);
     float crushedGrey = pow(lum, 1.0 + uDarkness * 3.5);
-    duotone = mix(desat * 0.08, desat, crushedGrey);
+    vec3 ascuasBase = mix(desat * 0.08, desat, crushedGrey);
+    // Blend mode applies here too now — previously this preset ignored the
+    // control entirely, so switching modes had no visible effect at all.
+    duotone = applyBlendMode(vec3(lum), ascuasBase, uBlendMode);
   } else if(presetId == 1){
     // "Cian / Rojo" — teal/cyan should DOMINATE across mids and shadows,
     // with hot red/pink only breaking through in the brightest highlights
@@ -635,7 +638,7 @@ const params = {
   darkness: 0.55,
   glow: 0.55,
   vignette: 0.5,
-  grain: 0.3
+  grain: 0.0
 };
 // Label for the "intensity" slider changes meaning per preset, since what
 // Label for the "intensity" slider changes meaning per preset, since what
@@ -827,41 +830,18 @@ async function startCamera(facing){
     return;
   }
 
-  // Torch (flash) detection is intentionally OUTSIDE the camera try/catch
-  // above and wrapped in its own try/catch: a failure here (unsupported
-  // API, odd device behavior, etc.) must never be able to make the whole
-  // camera flow report as broken — the camera already started fine by
-  // this point regardless of what happens with torch.
-  try{
-    torchOn = false;
-    torchBtn.classList.remove('active');
-    torchBtn.style.display = 'none';
-    const stream = currentStream;
-    const track = stream.getVideoTracks()[0];
-    if(track){
-      // getCapabilities() is known to report an empty object even on
-      // devices that DO support torch if queried too early — poll a few
-      // times with increasing delay instead of checking only once.
-      const tryDetectTorch = (attemptsLeft, delay) => {
-        setTimeout(() => {
-          try{
-            if(currentStream !== stream) return; // camera was switched again meanwhile
-            const capabilities = track.getCapabilities ? track.getCapabilities() : {};
-            if(capabilities && capabilities.torch){
-              torchBtn.style.display = 'flex';
-            } else if(attemptsLeft > 0){
-              tryDetectTorch(attemptsLeft - 1, delay + 300);
-            }
-          }catch(e){
-            console.error('Torch detection error:', e);
-          }
-        }, delay);
-      };
-      tryDetectTorch(4, 300);
-    }
-  }catch(err){
-    console.error('Torch setup error:', err);
-  }
+  // Torch (flash) button visibility is now based simply on which camera is
+  // active (front cameras don't have a real hardware torch — some phones
+  // fake a "flash" for selfies by flashing the screen white instead, which
+  // is a different technique entirely and not handled here). Detecting
+  // real torch support via getCapabilities() proved unreliable across
+  // devices/browsers, so instead: show the button on the rear camera and
+  // let the actual torch toggle attempt (in the button's click handler)
+  // succeed or fail — many browsers accept the attempt harmlessly even if
+  // unsupported, and it works cleanly on ones that do support it.
+  torchOn = false;
+  torchBtn.classList.remove('active');
+  torchBtn.style.display = (facing === 'environment') ? 'flex' : 'none';
 }
 startCamera(currentFacing);
 
@@ -880,9 +860,14 @@ torchBtn.addEventListener('click', async () => {
     torchOn = next;
     torchBtn.classList.toggle('active', torchOn);
   }catch(err){
-    // Some devices report torch capability but reject the constraint —
-    // fail quietly rather than breaking the rest of the UI.
+    // Some devices/browsers report no error but also don't actually toggle
+    // the flash, and some reject the constraint outright — brief on-screen
+    // feedback here instead of only logging, since torch failures are
+    // otherwise completely invisible to the person using the app.
     console.error('Torch error:', err);
+    hint.textContent = 'Este dispositivo no permite controlar el flash desde el navegador';
+    hint.classList.add('show');
+    setTimeout(() => hint.classList.remove('show'), 2500);
   }
 });
 
