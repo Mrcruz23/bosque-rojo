@@ -164,6 +164,18 @@
   }
   #hint.show{ display:block; }
 
+  #focusIndicator{
+    position:fixed; width:64px; height:64px;
+    border:2px solid rgba(255,90,90,0.9);
+    border-radius:6px;
+    transform:translate(-50%,-50%) scale(1.3);
+    pointer-events:none; z-index:6;
+    opacity:0; transition:opacity 0.2s, transform 0.2s;
+  }
+  #focusIndicator.show{
+    opacity:1; transform:translate(-50%,-50%) scale(1);
+  }
+
   #importBar{
     position:fixed; top:0; left:0; right:0; bottom:0;
     z-index:20; background:rgba(3,1,1,0.92);
@@ -201,6 +213,7 @@
   <canvas id="glcanvas"></canvas>
   <video id="srcVideo" playsinline muted autoplay></video>
   <video id="fileVideo" playsinline muted></video>
+  <div id="focusIndicator"></div>
 </div>
 
 <div id="hint">Iniciando cámara…</div>
@@ -217,6 +230,7 @@
     <div class="presetChip" data-preset="1">Cian/Rojo</div>
     <div class="presetChip" data-preset="2">Ascuas</div>
     <div class="presetChip" data-preset="3">Amanecer</div>
+    <div class="presetChip" data-preset="4">Enfoque Sangriento</div>
   </div>
 
   <div id="paramRow">
@@ -303,8 +317,9 @@ uniform float uDarkness;    // shadow crush
 uniform float uGlow;        // trunk noise glow amount
 uniform float uVignette;    // center darkening amount
 uniform float uGrain;       // fine grain
-uniform float uPreset;      // 0=Sangre 1=Cian/Rojo 2=Ascuas 3=Amanecer
+uniform float uPreset;      // 0=Sangre 1=Cian/Rojo 2=Ascuas 3=Amanecer 4=EnfoqueSangriento
 uniform float uBlendMode;   // 0=Normal 1=Multiply 2=Darken 3=Screen 4=Lighten 5=Overlay 6=SoftLight 7=Difference
+uniform vec2  uFocusPoint;  // normalized (0..1) tap position for "Enfoque Sangriento" — where the person tapped to set the focus reference
 uniform vec2  uResolution;
 
 float hash(vec2 p){
@@ -420,6 +435,37 @@ vec3 applyBlendMode(vec3 base, vec3 blend, float mode){
   return blend; // Normal / fallback
 }
 
+// --- RGB <-> HSV, standard formulas, used by "Enfoque Sangriento" to
+// desaturate out-of-focus areas without touching hue/lightness directly. ---
+vec3 rgb2hsv(vec3 c){
+  vec4 K = vec4(0.0, -1.0/3.0, 2.0/3.0, -1.0);
+  vec4 p = mix(vec4(c.bg, K.wz), vec4(c.gb, K.xy), step(c.b, c.g));
+  vec4 q = mix(vec4(p.xyw, c.r), vec4(c.r, p.yzx), step(p.x, c.r));
+  float d = q.x - min(q.w, q.y);
+  float e = 1.0e-10;
+  return vec3(abs(q.z + (q.w - q.y) / (6.0*d + e)), d / (q.x + e), q.x);
+}
+vec3 hsv2rgb(vec3 c){
+  vec4 K = vec4(1.0, 2.0/3.0, 1.0/3.0, 3.0);
+  vec3 p = abs(fract(c.xxx + K.xyz) * 6.0 - K.www);
+  return c.z * mix(K.xxx, clamp(p - K.xxx, 0.0, 1.0), c.y);
+}
+
+// Local sharpness proxy: average edge strength over a small neighborhood.
+// Real cameras defocus via lens blur, which we can't undo — but we CAN
+// measure which parts of the already-captured frame are naturally sharp
+// (in-focus subject) vs naturally soft (already-blurred background), and
+// use that as a mask. This is an approximation, not true depth data.
+float sharpnessAt(sampler2D tex, vec2 uv, vec2 texel){
+  float total = 0.0;
+  total += edgeStrength(tex, uv, texel);
+  total += edgeStrength(tex, uv + texel*vec2(2.0,0.0), texel);
+  total += edgeStrength(tex, uv + texel*vec2(-2.0,0.0), texel);
+  total += edgeStrength(tex, uv + texel*vec2(0.0,2.0), texel);
+  total += edgeStrength(tex, uv + texel*vec2(0.0,-2.0), texel);
+  return total / 5.0;
+}
+
 void main(){
   vec2 uv = vUv;
   vec4 srcColor = texture2D(uTex, uv);
@@ -469,14 +515,46 @@ void main(){
     duotone = mix(vec3(lum), blended, uIntensity);
     duotone += warmPush * (1.0 - cyanRedAmount);
   } else if(presetId == 3){
-    // "Amanecer" — warm amber/gold highlights over a muted brown-grey base (ref. image 4)
-    shadowColor = vec3(0.02, 0.015, 0.02);
-    highColor = vec3(0.95, 0.55, 0.15);
-    warmPush = vec3(0.025, 0.015, 0.005);
-    duotone = mix(shadowColor, highColor, redAmount);
-    vec3 blendedAmanecer = applyBlendMode(vec3(lum), duotone, uBlendMode);
+    // "Amanecer" — replaced per reference photo: dreamy violet/lavender fog
+    // in bright areas transitioning to deep red/maroon in shadows, NOT a
+    // simple 2-color duotone. Three-point gradient by luminance: near-white
+    // lavender highlights -> saturated violet midtones -> dark red shadows.
+    vec3 fogHigh = vec3(0.87, 0.86, 0.9);   // near-white lavender (brightest fog/sky)
+    vec3 violetMid = vec3(0.64, 0.6, 0.84);  // saturated violet (mid brightness)
+    vec3 redLow = vec3(0.43, 0.14, 0.18);    // deep red/maroon (shadows, ground)
+    float t1 = smoothstep(0.15, 0.55, lum);  // red -> violet transition
+    float t2 = smoothstep(0.55, 0.88, lum);  // violet -> lavender transition
+    vec3 mapped = mix(redLow, violetMid, t1);
+    mapped = mix(mapped, fogHigh, t2);
+    vec3 blendedAmanecer = applyBlendMode(vec3(lum), mapped, uBlendMode);
     duotone = mix(vec3(lum), blendedAmanecer, uIntensity);
-    duotone += warmPush * (1.0 - redAmount);
+  } else if(presetId == 4){
+    // "Enfoque Sangriento" — sharp (in-focus) areas get a red tint, soft
+    // (out-of-focus) areas get desaturated. Sharpness is measured from the
+    // real image content (edge strength), not simulated depth — a tapped
+    // point sets the sharpness REFERENCE level: areas as sharp or sharper
+    // than that point count as "in focus".
+    vec2 texel = 1.0 / uResolution.xy;
+    float mySharpness = sharpnessAt(uTex, uv, texel * 1.4);
+    float refSharpness = sharpnessAt(uTex, uFocusPoint, texel * 1.4);
+    // How in-focus this pixel is relative to the tapped reference — clamped
+    // so pixels much sharper than the reference are still fully "in focus"
+    // rather than pushing past 1.0.
+    float focusAmount = clamp(mySharpness / max(refSharpness, 0.05), 0.0, 1.0);
+    focusAmount = smoothstep(0.25, 0.85, focusAmount);
+
+    vec3 hsv = rgb2hsv(srcColor.rgb);
+    // Desaturate out-of-focus areas (uGlow controls how much).
+    float desatAmount = (1.0 - focusAmount) * uGlow;
+    hsv.y = hsv.y * (1.0 - desatAmount);
+    vec3 desaturatedScene = hsv2rgb(hsv);
+
+    // Red tint on in-focus areas (uIntensity controls how much), applied
+    // through the chosen blend mode instead of a flat mix so Screen/Multiply/
+    // etc. all have a real effect here too.
+    vec3 redTint = vec3(0.85, 0.08, 0.08);
+    vec3 tintedScene = applyBlendMode(desaturatedScene, redTint, uBlendMode);
+    duotone = mix(desaturatedScene, tintedScene, focusAmount * uIntensity);
   } else {
     // "Sangre" (default) — near-black shadows, blood/ember red highlights
     shadowColor = vec3(0.0, 0.0, 0.0);
@@ -624,6 +702,7 @@ const uVignette = gl.getUniformLocation(program, 'uVignette');
 const uGrain = gl.getUniformLocation(program, 'uGrain');
 const uPreset = gl.getUniformLocation(program, 'uPreset');
 const uBlendMode = gl.getUniformLocation(program, 'uBlendMode');
+const uFocusPoint = gl.getUniformLocation(program, 'uFocusPoint');
 const uResolution = gl.getUniformLocation(program, 'uResolution');
 
 const texture = gl.createTexture();
@@ -653,16 +732,19 @@ const presetDefaults = {
   0: { intensity: 1.0, darkness: 0.25, glow: 0.35, vignette: 0.5, grain: 0.0, blendMode: 0 },
   1: { intensity: 1.0, darkness: 0.35, glow: 0.35, vignette: 0.5, grain: 0.0, blendMode: 2 },
   2: { intensity: 0.85, darkness: 0.55, glow: 0.5, vignette: 0.25, grain: 0.0, blendMode: 0 },
-  3: { intensity: 0.7, darkness: 0.55, glow: 0.35, vignette: 0.5, grain: 0.0, blendMode: 0 }
+  3: { intensity: 0.7, darkness: 0.55, glow: 0.35, vignette: 0.5, grain: 0.0, blendMode: 0 },
+  4: { intensity: 0.75, darkness: 0.5, glow: 0.6, vignette: 0.0, grain: 0.0, blendMode: 0 }
 };
 // Label for the "intensity" slider changes meaning per preset, since what
 // uIntensity actually drives is different in each one (color mix strength
-// in Sangre/Cian-Rojo/Amanecer, red edge glow strength in Ascuas).
+// in Sangre/Cian-Rojo/Amanecer, red edge glow strength in Ascuas, red tint
+// amount on in-focus areas in Enfoque Sangriento).
 const intensityLabelByPreset = {
   0: 'Rojo',
   1: 'Cian / Rojo',
   2: 'Brillo rojo',
-  3: 'Rojo'
+  3: 'Rojo',
+  4: 'Rojo'
 };
 // Same idea for the "glow" slider (uGlow): trunk sparkle brightness in most
 // presets, but the cyan halo strength specifically in Ascuas.
@@ -670,7 +752,8 @@ const glowLabelByPreset = {
   0: 'Brillos',
   1: 'Brillos',
   2: 'Brillo cian',
-  3: 'Brillo troncos'
+  3: 'Brillo troncos',
+  4: 'Saturación'
 };
 const paramLabels = {
   intensity: 'Rojo',
@@ -688,6 +771,10 @@ const PRESETS = [
 ];
 let currentPreset = 0;
 let currentBlendMode = 0;
+// Tap-to-focus reference point for "Enfoque Sangriento", normalized 0..1
+// (0.5, 0.4 = slightly above center, a reasonable default subject position).
+let focusPointX = 0.5;
+let focusPointY = 0.4;
 
 let currentParam = 'intensity';
 const chips = document.querySelectorAll('.chip');
@@ -772,6 +859,35 @@ function resizeCanvas(){
 window.addEventListener('resize', resizeCanvas);
 resizeCanvas();
 
+// ---------- Tap-to-focus (used by "Enfoque Sangriento") ----------
+// Works like a normal phone camera's focus tap: shows a brief square
+// indicator where tapped, and sets that point as the sharpness reference
+// the shader compares every pixel against.
+const focusIndicator = document.getElementById('focusIndicator');
+let focusIndicatorTimeout = null;
+canvas.addEventListener('pointerdown', (e) => {
+  const rect = canvas.getBoundingClientRect();
+  const relX = (e.clientX - rect.left) / rect.width;
+  const relY = (e.clientY - rect.top) / rect.height;
+  focusPointX = Math.min(Math.max(relX, 0.0), 1.0);
+  // No Y-flip needed here: the vertex shader already does `vUv.y = 1.0 - vUv.y`,
+  // so uv in the fragment shader is already in normal screen space (0=top,
+  // 1=bottom) — the same convention as relY from clientY/rect.height.
+  focusPointY = Math.min(Math.max(relY, 0.0), 1.0);
+
+  focusIndicator.style.left = e.clientX + 'px';
+  focusIndicator.style.top = e.clientY + 'px';
+  focusIndicator.classList.remove('show');
+  // Force reflow so re-adding the class re-triggers the CSS transition even
+  // if the person taps twice in the same spot quickly.
+  void focusIndicator.offsetWidth;
+  focusIndicator.classList.add('show');
+  clearTimeout(focusIndicatorTimeout);
+  focusIndicatorTimeout = setTimeout(() => {
+    focusIndicator.classList.remove('show');
+  }, 700);
+});
+
 // ---------- Render loop ----------
 let startTime = performance.now();
 let fpsFrameCount = 0;
@@ -810,6 +926,7 @@ function render(){
     gl.uniform1f(uGrain, params.grain);
     gl.uniform1f(uPreset, currentPreset);
     gl.uniform1f(uBlendMode, currentBlendMode);
+    gl.uniform2f(uFocusPoint, focusPointX, focusPointY);
     gl.uniform2f(uResolution, canvas.width, canvas.height);
 
     gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
