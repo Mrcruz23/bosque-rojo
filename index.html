@@ -229,13 +229,14 @@
     <div class="presetChip selected" data-preset="0">Sangre</div>
     <div class="presetChip" data-preset="1">Cian/Rojo</div>
     <div class="presetChip" data-preset="2">Ascuas</div>
-    <div class="presetChip" data-preset="3">Amanecer</div>
+    <div class="presetChip" data-preset="3">Onírico</div>
     <div class="presetChip" data-preset="4">Enfoque Sangriento</div>
   </div>
 
   <div id="paramRow">
     <div class="chip selected" data-param="intensity">Rojo</div>
     <div class="chip" data-param="glow">Brillos</div>
+    <div class="chip" data-param="blueAmount">Azul</div>
     <div class="chip" data-param="darkness">Sombra</div>
     <div class="chip" data-param="vignette">Viñeta</div>
     <div class="chip" data-param="grain">Ruido</div>
@@ -320,6 +321,7 @@ uniform float uGrain;       // fine grain
 uniform float uPreset;      // 0=Sangre 1=Cian/Rojo 2=Ascuas 3=Amanecer 4=EnfoqueSangriento
 uniform float uBlendMode;   // 0=Normal 1=Multiply 2=Darken 3=Screen 4=Lighten 5=Overlay 6=SoftLight 7=Difference
 uniform vec2  uFocusPoint;  // normalized (0..1) tap position for "Enfoque Sangriento" — where the person tapped to set the focus reference
+uniform float uBlueAmount;  // "Onírico" only: amount of blue/fog tint in the misty midtone band
 uniform vec2  uResolution;
 
 float hash(vec2 p){
@@ -457,13 +459,21 @@ vec3 hsv2rgb(vec3 c){
 // (in-focus subject) vs naturally soft (already-blurred background), and
 // use that as a mask. This is an approximation, not true depth data.
 float sharpnessAt(sampler2D tex, vec2 uv, vec2 texel){
+  // Wider sampling radius than before (was too tight — a single unlucky
+  // sample near a smooth patch of the in-focus subject could report low
+  // sharpness, making the reference level unreliable and causing nearly
+  // the whole frame to register as "in focus" when compared against it).
   float total = 0.0;
   total += edgeStrength(tex, uv, texel);
-  total += edgeStrength(tex, uv + texel*vec2(2.0,0.0), texel);
-  total += edgeStrength(tex, uv + texel*vec2(-2.0,0.0), texel);
-  total += edgeStrength(tex, uv + texel*vec2(0.0,2.0), texel);
-  total += edgeStrength(tex, uv + texel*vec2(0.0,-2.0), texel);
-  return total / 5.0;
+  total += edgeStrength(tex, uv + texel*vec2(4.0,0.0), texel);
+  total += edgeStrength(tex, uv + texel*vec2(-4.0,0.0), texel);
+  total += edgeStrength(tex, uv + texel*vec2(0.0,4.0), texel);
+  total += edgeStrength(tex, uv + texel*vec2(0.0,-4.0), texel);
+  total += edgeStrength(tex, uv + texel*vec2(3.0,3.0), texel);
+  total += edgeStrength(tex, uv + texel*vec2(-3.0,3.0), texel);
+  total += edgeStrength(tex, uv + texel*vec2(3.0,-3.0), texel);
+  total += edgeStrength(tex, uv + texel*vec2(-3.0,-3.0), texel);
+  return total / 9.0;
 }
 
 void main(){
@@ -515,33 +525,52 @@ void main(){
     duotone = mix(vec3(lum), blended, uIntensity);
     duotone += warmPush * (1.0 - cyanRedAmount);
   } else if(presetId == 3){
-    // "Amanecer" — replaced per reference photo: dreamy violet/lavender fog
-    // in bright areas transitioning to deep red/maroon in shadows, NOT a
-    // simple 2-color duotone. Three-point gradient by luminance: near-white
-    // lavender highlights -> saturated violet midtones -> dark red shadows.
-    vec3 fogHigh = vec3(0.87, 0.86, 0.9);   // near-white lavender (brightest fog/sky)
-    vec3 violetMid = vec3(0.64, 0.6, 0.84);  // saturated violet (mid brightness)
-    vec3 redLow = vec3(0.43, 0.14, 0.18);    // deep red/maroon (shadows, ground)
-    float t1 = smoothstep(0.15, 0.55, lum);  // red -> violet transition
-    float t2 = smoothstep(0.55, 0.88, lum);  // violet -> lavender transition
-    vec3 mapped = mix(redLow, violetMid, t1);
-    mapped = mix(mapped, fogHigh, t2);
-    vec3 blendedAmanecer = applyBlendMode(vec3(lum), mapped, uBlendMode);
-    duotone = mix(vec3(lum), blendedAmanecer, uIntensity);
+    // "Onírico" (formerly Amanecer) — 5-zone gradient per reference photo:
+    // near-black shadows -> red shadows -> violet midtones -> blue-ish fog
+    // -> near-white highlights (the "sky"/light source). Each band mixes in
+    // sequentially by luminance, independently scaled by its own control:
+    // uIntensity=red, uGlow=violet, uBlueAmount=blue/fog (widest band, since
+    // it was described as the most diffuse/spread-out of the three).
+    vec3 nearBlack = vec3(0.03, 0.015, 0.02);
+    vec3 redShadow = vec3(0.42, 0.09, 0.14);
+    vec3 violetMid = vec3(0.5, 0.38, 0.66);
+    vec3 blueFog   = vec3(0.42, 0.4, 0.66);
+    vec3 skyHigh   = vec3(0.93, 0.94, 0.97);
+
+    vec3 mapped = nearBlack;
+    float aRed = smoothstep(0.1, 0.32, lum) * uIntensity;
+    mapped = mix(mapped, redShadow, aRed);
+    float aViolet = smoothstep(0.28, 0.55, lum) * uGlow;
+    mapped = mix(mapped, violetMid, aViolet);
+    float aBlue = smoothstep(0.48, 0.8, lum) * uBlueAmount;
+    mapped = mix(mapped, blueFog, aBlue);
+    float aSky = smoothstep(0.82, 0.96, lum);
+    mapped = mix(mapped, skyHigh, aSky);
+
+    duotone = applyBlendMode(vec3(lum), mapped, uBlendMode);
   } else if(presetId == 4){
     // "Enfoque Sangriento" — sharp (in-focus) areas get a red tint, soft
     // (out-of-focus) areas get desaturated. Sharpness is measured from the
     // real image content (edge strength), not simulated depth — a tapped
-    // point sets the sharpness REFERENCE level: areas as sharp or sharper
-    // than that point count as "in focus".
+    // point sets the sharpness REFERENCE level.
+    //
+    // IMPORTANT: comparing via a simple ratio (mySharpness/refSharpness)
+    // with a low floor made almost anything with SOME texture register as
+    // "in focus", since any sharpness above ~0.05 divided by a low reference
+    // clamps straight to 1.0 — that's what caused the "everything gets a
+    // little red" bloodbath look instead of a clean in-focus/out-of-focus
+    // split. Comparing the ABSOLUTE difference against the reference (not a
+    // ratio) and requiring close similarity fixes this: only areas genuinely
+    // as sharp as what was tapped qualify, and the falloff is much harder
+    // so most of the frame stays fully untinted instead of partially tinted.
     vec2 texel = 1.0 / uResolution.xy;
     float mySharpness = sharpnessAt(uTex, uv, texel * 1.4);
     float refSharpness = sharpnessAt(uTex, uFocusPoint, texel * 1.4);
-    // How in-focus this pixel is relative to the tapped reference — clamped
-    // so pixels much sharper than the reference are still fully "in focus"
-    // rather than pushing past 1.0.
-    float focusAmount = clamp(mySharpness / max(refSharpness, 0.05), 0.0, 1.0);
-    focusAmount = smoothstep(0.25, 0.85, focusAmount);
+    float sharpnessDiff = refSharpness - mySharpness; // positive = blurrier than reference
+    // Hard falloff: only pixels within a small sharpness deficit of the
+    // reference count as in-focus at all. Anything noticeably blurrier than
+    // the tapped point drops to 0 quickly instead of fading in gradually.
+    float focusAmount = 1.0 - smoothstep(0.015, 0.09, sharpnessDiff);
 
     vec3 hsv = rgb2hsv(srcColor.rgb);
     // Desaturate out-of-focus areas (uGlow controls how much).
@@ -566,13 +595,22 @@ void main(){
     duotone += warmPush * (1.0 - redAmount);
   }
 
-  // --- Vignette: darken the center-ish where silhouettes usually are ---
+  // --- Vignette: real corner-darkening vignette (elliptical, matches screen
+  // aspect ratio) — center always stays untouched, corners darken more as
+  // uVignette increases. Previous version measured distance to a horizontal
+  // band through the center instead of true radial distance, so it darkened
+  // a strip across the middle of the frame instead of the corners.
   vec2 centered = (uv - 0.5) * vec2(uResolution.x/uResolution.y, 1.0);
-  float distToCenterBand = abs(centered.y + 0.05);
-  float bandMask = smoothstep(0.55, 0.05, distToCenterBand);
-  float edgeVign = smoothstep(0.95, 0.35, length(centered));
-  float vign = mix(1.0, mix(1.0, 0.15, bandMask), uVignette) * mix(1.0, edgeVign, uVignette*0.6);
-  duotone *= mix(1.0, vign, uVignette);
+  float distFromCenter = length(centered);
+  // Inner edge stays fixed; outer edge moves inward as vignette strength
+  // increases, so a stronger vignette darkens a larger area starting closer
+  // to the center, reaching further into the frame at max strength.
+  float outerEdge = 0.75 - uVignette * 0.35;
+  float vignetteDarken = smoothstep(0.25, outerEdge, distFromCenter);
+  // Floor at 0.15 (not 0.0) so even at max strength it dims rather than
+  // going fully black, matching what already felt right before.
+  float vign = 1.0 - vignetteDarken * uVignette * 0.85;
+  duotone *= vign;
 
   // --- Glowing noise masked onto dark, vertical (trunk-like) areas ---
   // Tighter luminance window: only the deepest shadows qualify, so in a very
@@ -703,6 +741,7 @@ const uGrain = gl.getUniformLocation(program, 'uGrain');
 const uPreset = gl.getUniformLocation(program, 'uPreset');
 const uBlendMode = gl.getUniformLocation(program, 'uBlendMode');
 const uFocusPoint = gl.getUniformLocation(program, 'uFocusPoint');
+const uBlueAmount = gl.getUniformLocation(program, 'uBlueAmount');
 const uResolution = gl.getUniformLocation(program, 'uResolution');
 
 const texture = gl.createTexture();
@@ -722,7 +761,8 @@ const params = {
   darkness: 0.25,
   glow: 0.35,
   vignette: 0.5,
-  grain: 0.0
+  grain: 0.0,
+  blueAmount: 0.5
 };
 // Per-preset default values — applied automatically whenever the person
 // switches presets, so each look starts from settings tuned for it instead
@@ -732,7 +772,7 @@ const presetDefaults = {
   0: { intensity: 1.0, darkness: 0.25, glow: 0.35, vignette: 0.5, grain: 0.0, blendMode: 0 },
   1: { intensity: 1.0, darkness: 0.35, glow: 0.35, vignette: 0.5, grain: 0.0, blendMode: 2 },
   2: { intensity: 0.85, darkness: 0.55, glow: 0.5, vignette: 0.25, grain: 0.0, blendMode: 0 },
-  3: { intensity: 0.7, darkness: 0.55, glow: 0.35, vignette: 0.5, grain: 0.0, blendMode: 0 },
+  3: { intensity: 0.8, darkness: 0.55, glow: 0.8, vignette: 0.5, grain: 0.0, blendMode: 0, blueAmount: 0.7 },
   4: { intensity: 0.75, darkness: 0.5, glow: 0.6, vignette: 0.0, grain: 0.0, blendMode: 0 }
 };
 // Label for the "intensity" slider changes meaning per preset, since what
@@ -752,7 +792,7 @@ const glowLabelByPreset = {
   0: 'Brillos',
   1: 'Brillos',
   2: 'Brillo cian',
-  3: 'Brillo troncos',
+  3: 'Violeta',
   4: 'Saturación'
 };
 const paramLabels = {
@@ -760,14 +800,15 @@ const paramLabels = {
   darkness: 'Sombra',
   glow: 'Brillos',
   vignette: 'Viñeta',
-  grain: 'Ruido'
+  grain: 'Ruido',
+  blueAmount: 'Azul'
 };
 
 const PRESETS = [
   { id: 0, name: 'Sangre' },
   { id: 1, name: 'Cian/Rojo' },
   { id: 2, name: 'Ascuas' },
-  { id: 3, name: 'Amanecer' }
+  { id: 3, name: 'Onírico' }
 ];
 let currentPreset = 0;
 let currentBlendMode = 0;
@@ -805,6 +846,7 @@ presetChips.forEach(chip => {
     params.glow = defaults.glow;
     params.vignette = defaults.vignette;
     params.grain = defaults.grain;
+    params.blueAmount = (defaults.blueAmount !== undefined) ? defaults.blueAmount : 0.5;
     currentBlendMode = defaults.blendMode;
     blendChips.forEach(c => c.classList.toggle('selected', parseInt(c.dataset.blend, 10) === currentBlendMode));
     if(currentParam === 'blendmode'){
@@ -927,6 +969,7 @@ function render(){
     gl.uniform1f(uPreset, currentPreset);
     gl.uniform1f(uBlendMode, currentBlendMode);
     gl.uniform2f(uFocusPoint, focusPointX, focusPointY);
+    gl.uniform1f(uBlueAmount, params.blueAmount);
     gl.uniform2f(uResolution, canvas.width, canvas.height);
 
     gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
